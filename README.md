@@ -75,7 +75,10 @@ run_video(runner, 'demo.mp4', 'demo_boxed.mp4',
 | `lrai_locate_anything.trt.engine` | `TRTEngine` wrapper around `tensorrt.IExecutionContext` |
 | `lrai_locate_anything.trt.build` | `build_engine` + per-graph optimization profiles |
 | `lrai_locate_anything.orchestrator` | `LocateAnythingRunner` — the public API; mirrors the canonical `generate()` with MTP↔AR hybrid |
-| `lrai_locate_anything.pipelines` | `run_image`, `run_video`, side-by-side multi-runtime comparison |
+| `lrai_locate_anything.pipelines` | `run_image`, `run_video`, `run_compare` side-by-side multi-runtime |
+| `lrai_locate_anything.benchmark` | `bench_text_runtimes`, `bench_image`, `bench_video_compare` — apples-to-apples latency tables |
+| `lrai_locate_anything.trtllm` | Optional TRT-LLM parallel path: `install_trtllm`, `dump_qwen2_lm_only`, `convert_and_build`, `TRTLLMRunner` |
+| `lrai_locate_anything.trt.plugins` | `packed_varlen_attn_plugin.cu` + `BUILD.md` — FlashAttention-2 varlen plugin source for >2.5K-resolution vision |
 
 ## Architecture invariants (what's load-bearing)
 
@@ -97,9 +100,46 @@ GPU requirements:
 - **16 GB VRAM** (T4, V100-16): vision + projector TRT engines build; LLM stays on PyTorch (orchestrator's fallback path)
 - **CPU-only**: not supported
 
-## Original notebook
+## Notebooks
 
-The notebook that produced this package is preserved at [`docs/LocateAnything_3B_TensorRT.ipynb`](docs/LocateAnything_3B_TensorRT.ipynb) for reference. Every iteration log + audit trail lives in the git history of this repo.
+| Notebook | Purpose |
+|---|---|
+| [`docs/lrai_locate_anything_demo.ipynb`](docs/lrai_locate_anything_demo.ipynb) | **The one-click demo.** ~10 cells: install package, load model, run image/video, optional benchmark, optional TRT-LLM. Use this. |
+| [`docs/LocateAnything_3B_TensorRT.ipynb`](docs/LocateAnything_3B_TensorRT.ipynb) | The original 60-cell development notebook, preserved for reference (every iteration log + audit trail lives in this file). |
+
+## Optional accelerators
+
+### TRT-LLM parallel path
+
+```python
+from lrai_locate_anything.trtllm import install_trtllm, dump_qwen2_lm_only, convert_and_build, TRTLLMRunner
+
+if install_trtllm():
+    qwen_dir = dump_qwen2_lm_only(runner.model, runner.tokenizer, runner.config)
+    engine_dir = convert_and_build(qwen_dir)
+    trtllm = TRTLLMRunner(engine_dir, runner.tokenizer)
+    print(trtllm.generate_text('Detect cats: ', max_new_tokens=64))
+```
+
+The `install_trtllm()` helper probes torch's version and picks a TRT-LLM wheel that matches the libtorch ABI. AR-only at the moment — porting PBD/MTP into TRT-LLM's speculative-decoding hooks is a separate ~200 LOC effort.
+
+### Side-by-side benchmark
+
+```python
+from lrai_locate_anything.benchmark import bench_text_runtimes, print_text_table, bench_video_compare
+
+# Text-only AR latency table across PyTorch / Plain TRT / TRT-LLM
+results = bench_text_runtimes(runner, trtllm_runner=trtllm)
+print_text_table(results)
+
+# Side-by-side video panels (TRT+MTP vs TRT-AR vs PyTorch) with cross-runtime IoU
+metrics = bench_video_compare(runner, 'luggage.mp4', 'compare.mp4',
+                               prompt='Detect roller bags and shoulder bags.', max_frames=30)
+```
+
+### Packed-varlen attention plugin
+
+For inference at >2.5 K image resolution, the SDPA fallback's O(L²) mask materialisation dominates wall-clock. [`lrai_locate_anything/trt/plugins/packed_varlen_attn_plugin.cu`](lrai_locate_anything/trt/plugins/packed_varlen_attn_plugin.cu) is a TensorRT 10 plugin that wraps FlashAttention-2's `flash_attn_varlen_fwd`; build + load instructions are in [`BUILD.md`](lrai_locate_anything/trt/plugins/BUILD.md).
 
 ## License
 

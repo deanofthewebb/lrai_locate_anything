@@ -50,6 +50,10 @@ trt = [
     "cuda-python>=12.6,<13",
 ]
 int4 = ["nvidia-modelopt[torch]"]
+# TRT-LLM is an OPTIONAL accelerator. Install via the install_trtllm() helper
+# rather than pip extras — the wheel matching the active PyTorch version
+# changes per release, so we probe at install time.
+trtllm-marker = []
 dev = ["pytest", "ruff", "black"]
 
 [project.urls]
