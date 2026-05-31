@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Tuple
 
 import torch
-import onnx
+# onnx is imported lazily inside export_with_external_data so the package can be
+# imported (and the wrapper class signatures inspected) without a heavy dep chain.
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +91,7 @@ def export_with_external_data(wrap, args, onnx_path: Path, **kw) -> None:
         print(f"[export] cached: {onnx_path}")
         return
 
+    import onnx  # lazy: only needed inside this function
     tmp = onnx_path.parent / (onnx_path.stem + "_tmp")
     tmp.mkdir(exist_ok=True)
     tmp_file = tmp / "model.onnx"

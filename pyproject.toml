@@ -62,3 +62,15 @@ Issues = "https://github.com/deanofthewebb/lrai_locate_anything/issues"
 
 [tool.setuptools.packages.find]
 include = ["lrai_locate_anything*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "gpu: requires CUDA-capable GPU",
+    "trt: requires tensorrt installed",
+    "trtllm: requires tensorrt_llm installed",
+    "heavy: requires full LocateAnything-3B model (set LRAI_RUN_HEAVY=1 to enable)",
+]

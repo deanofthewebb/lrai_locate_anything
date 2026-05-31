@@ -1,0 +1,37 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install CPU-friendly subset (no CUDA / TRT / TRT-LLM)
+        run: |
+          python -m pip install --upgrade pip
+          # Install the package WITHOUT the [trt] extra so we don't try to fetch
+          # CUDA wheels on a CPU CI runner. Pure-logic tests still run.
+          pip install pytest numpy pillow
+          pip install "torch>=2.4" --index-url https://download.pytorch.org/whl/cpu
+          pip install "transformers>=4.46,<4.60"
+          pip install -e . --no-deps
+      - name: Run CPU-only unit tests
+        run: |
+          # Pure-logic tests: parse, iou, patch_merger, patches (sdpa/rope/Rope2DReal),
+          # shims, config (non-GPU paths), trtllm.install probe, export wrappers'
+          # signatures, orchestrator TID dict, pipelines signatures, model_loader
+          # helpers, TRT engine wrapper contract (uses skip markers for missing TRT).
+          # GPU/TRT/TRT-LLM/heavy tests are auto-skipped on CI.
+          pytest -v tests/ --tb=short

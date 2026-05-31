@@ -22,9 +22,11 @@ def install_transformers_shims(verbose: bool = True) -> None:
     # ---------------------------------------------------------------------------
     # 1) _tied_weights_keys: legacy `List[str]` -> modern `Dict[str, str]`.
     # transformers >=4.55 calls .keys() on the value inside `post_init`. The
-    # vendored Qwen2ForCausalLM declares it as a list.
+    # vendored Qwen2ForCausalLM declares it as a list. Older transformers don't
+    # have the method at all — no shim needed there.
     # ---------------------------------------------------------------------------
-    if not getattr(_mu.PreTrainedModel.get_expanded_tied_weights_keys, "_locany_patched", False):
+    if hasattr(_mu.PreTrainedModel, "get_expanded_tied_weights_keys") and \
+       not getattr(_mu.PreTrainedModel.get_expanded_tied_weights_keys, "_locany_patched", False):
         _orig_tied = _mu.PreTrainedModel.get_expanded_tied_weights_keys
 
         def _patched_tied(self, all_submodels: bool = False):
@@ -44,9 +46,10 @@ def install_transformers_shims(verbose: bool = True) -> None:
     # 2) mark_tied_weights_as_initialized: gracefully no-op when post_init wasn't called.
     # The outer LocateAnythingForConditionalGeneration.__init__ skips post_init(); without
     # the shim, transformers' _finalize_load_state_dict hits an AttributeError on
-    # `self.all_tied_weights_keys`.
+    # `self.all_tied_weights_keys`. Only present in transformers >=4.55.
     # ---------------------------------------------------------------------------
-    if not getattr(_mu.PreTrainedModel.mark_tied_weights_as_initialized, "_locany_patched", False):
+    if hasattr(_mu.PreTrainedModel, "mark_tied_weights_as_initialized") and \
+       not getattr(_mu.PreTrainedModel.mark_tied_weights_as_initialized, "_locany_patched", False):
         _orig_mark = _mu.PreTrainedModel.mark_tied_weights_as_initialized
 
         def _patched_mark(self):
