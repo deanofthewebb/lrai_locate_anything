@@ -66,6 +66,34 @@ def _have(mod: str) -> bool:
         return False
 
 
+def ensure_runtime_deps(verbose: bool = True) -> None:
+    """Install optional runtime deps that Colab/typical PyTorch images don't ship
+    but the package uses (decord, lmdb, opencv-python-headless, onnxscript,
+    polygraphy). Pinned to avoid upgrading anything already installed.
+
+    Idempotent. Does NOT install the NVIDIA stack — call ensure_nvidia_stack() for that.
+    """
+    pkgs: list[str] = []
+    for mod_name, pip_name in [
+        ("decord", "decord"),
+        ("lmdb", "lmdb"),
+        ("timm", "timm"),
+        ("sentencepiece", "sentencepiece"),
+        ("safetensors", "safetensors"),
+        ("accelerate", "accelerate"),
+        ("onnxscript", "onnxscript"),
+        ("cv2", "opencv-python-headless"),
+    ]:
+        if not _have(mod_name):
+            pkgs.append(pip_name)
+    if pkgs:
+        if verbose:
+            print(f"[lrai] installing missing runtime deps: {' '.join(pkgs)}")
+        # No --force-reinstall: leave pre-installed packages alone so we don't
+        # downgrade Colab's scientific stack (numpy, Pillow, fsspec, etc).
+        _sh(f"pip -q install --no-input {' '.join(pkgs)}")
+
+
 def ensure_nvidia_stack(verbose: bool = True) -> None:
     """Install the NVIDIA wheel stack if missing. Idempotent.
 
@@ -76,8 +104,10 @@ def ensure_nvidia_stack(verbose: bool = True) -> None:
     """
     pkgs: list[str] = []
     if not _have("tensorrt"):
-        pkgs.append('"tensorrt==10.7.*"')
-        pkgs.append('"tensorrt-cu12==10.7.*"')
+        # TRT >=10.15 ships wheels built against numpy 2.x; older 10.7 wheels
+        # required numpy<2 which broke ~20 Colab libs (jax, opencv, shap, ...).
+        pkgs.append('"tensorrt>=10.15,<11"')
+        pkgs.append('"tensorrt-cu12>=10.15,<11"')
     if not _have("cuda.bindings"):
         pkgs.append('"cuda-python>=12.6,<13"')
     if not _have("polygraphy"):

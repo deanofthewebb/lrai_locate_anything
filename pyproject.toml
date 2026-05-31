@@ -21,32 +21,28 @@ classifiers = [
     "Environment :: GPU :: NVIDIA CUDA",
 ]
 
+# Dependencies are intentionally minimal. Most Colab / modern PyTorch CUDA images
+# already ship: torch, transformers, accelerate, safetensors, huggingface_hub,
+# Pillow, numpy, opencv, einops, sentencepiece. Adding them as hard deps forces
+# pip to consider upgrades, which (with --force-reinstall) cascades and breaks
+# the host's pre-existing scientific stack. We DECLARE only what's load-bearing
+# at runtime AND not commonly pre-installed; remaining runtime deps (NVIDIA
+# stack, decord, lmdb, etc.) are added on demand via ensure_nvidia_stack() and
+# ensure_runtime_deps().
 dependencies = [
     "torch>=2.4",
     "transformers>=4.46,<4.60",
-    "accelerate",
-    "safetensors",
-    "sentencepiece",
-    "einops",
     "huggingface_hub>=0.24,<1.0",
     "peft>=0.10,<0.13",
-    "decord",
-    "lmdb",
-    "timm",
+    "einops",
     "Pillow",
-    "numpy<2.0",
     "onnx",
-    "onnxscript",
-    "onnxruntime-gpu",
-    "polygraphy",
-    "opencv-python-headless==4.10.*",
-    "huggingface_hub",
 ]
 
 [project.optional-dependencies]
 trt = [
-    "tensorrt==10.7.*",
-    "tensorrt-cu12==10.7.*",
+    "tensorrt>=10.15,<11",
+    "tensorrt-cu12>=10.15,<11",
     "cuda-python>=12.6,<13",
 ]
 int4 = ["nvidia-modelopt[torch]"]
