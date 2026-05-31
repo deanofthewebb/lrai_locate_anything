@@ -1,10 +1,11 @@
-"""Colab deploy: install lrai_locate_anything from GitHub, run a sanity check.
+"""Colab deploy: install lrai_locate_anything from GitHub using a PAT from Colab secrets.
 
 Paste this whole file into a Colab cell, or:
     !curl -sL https://raw.githubusercontent.com/deanofthewebb/lrai_locate_anything/main/scripts/colab_deploy.py | python -
 
-The cell reads GITHUB_PAT from Colab userdata for private-repo access; if your repo
-is public, the PAT is optional.
+Reads GITHUB_PAT (or GITHUB_TOKEN) from Colab userdata. Falls back to anonymous
+git+https if no PAT is set — works for the public repo but rate-limited and won't
+authenticate if the repo becomes private.
 """
 import os
 import subprocess
@@ -18,34 +19,39 @@ def _sh(cmd: str) -> None:
         raise SystemExit(r.returncode)
 
 
-def main():
-    # Read PAT from Colab secrets if available.
+def main() -> None:
     pat = None
+    pat_src = None
     try:
-        from google.colab import userdata
+        from google.colab import userdata  # type: ignore
         for key in ("GITHUB_PAT", "GITHUB_TOKEN"):
             try:
-                pat = userdata.get(key)
-                if pat:
-                    print(f"Using {key} from Colab secrets.")
+                v = userdata.get(key)
+                if v:
+                    pat, pat_src = v, f"Colab secret {key}"
                     break
             except Exception:
                 continue
     except ImportError:
-        pat = os.environ.get("GITHUB_PAT") or os.environ.get("GITHUB_TOKEN")
+        for key in ("GITHUB_PAT", "GITHUB_TOKEN"):
+            v = os.environ.get(key)
+            if v:
+                pat, pat_src = v, f"env var {key}"
+                break
 
-    user = "deanofthewebb"
-    repo = "lrai_locate_anything"
+    user, repo = "deanofthewebb", "lrai_locate_anything"
     if pat:
-        url = f"https://{user}:{pat}@github.com/{user}/{repo}.git"
+        print(f"Using {pat_src} for authenticated install.")
+        # x-access-token works for both classic + fine-grained PATs.
+        url = f"https://x-access-token:{pat}@github.com/{user}/{repo}.git"
     else:
+        print("No GITHUB_PAT / GITHUB_TOKEN found — falling back to anonymous install.")
         url = f"https://github.com/{user}/{repo}.git"
 
     _sh(f"pip -q install --force-reinstall 'git+{url}'")
 
-    # Quick sanity check
     print("\nSanity check:")
-    _sh(f"python -c 'import lrai_locate_anything; print(lrai_locate_anything.__version__)'")
+    _sh("python -c 'import lrai_locate_anything; print(lrai_locate_anything.__version__)'")
     print()
     print("Quick start:")
     print("    from lrai_locate_anything import LocateAnythingRunner, run_image")
