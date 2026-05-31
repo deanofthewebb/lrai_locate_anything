@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lrai_locate_anything"
+version = "0.1.0"
+description = "Modular runtime for NVIDIA LocateAnything-3B: ONNX export, TensorRT engines, PBD orchestrator, video inference."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Dean Webb", email = "dean.webb@livereach.ai" }]
+keywords = ["vision-language", "tensorrt", "onnx", "vlm", "grounding", "detection", "nvidia"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
+
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.46,<4.60",
+    "accelerate",
+    "safetensors",
+    "sentencepiece",
+    "einops",
+    "huggingface_hub>=0.24,<1.0",
+    "peft>=0.10,<0.13",
+    "decord",
+    "lmdb",
+    "timm",
+    "Pillow",
+    "numpy<2.0",
+    "onnx",
+    "onnxscript",
+    "onnxruntime-gpu",
+    "polygraphy",
+    "opencv-python-headless==4.10.*",
+    "huggingface_hub",
+]
+
+[project.optional-dependencies]
+trt = [
+    "tensorrt==10.7.*",
+    "tensorrt-cu12==10.7.*",
+    "cuda-python>=12.6,<13",
+]
+int4 = ["nvidia-modelopt[torch]"]
+dev = ["pytest", "ruff", "black"]
+
+[project.urls]
+Repository = "https://github.com/deanofthewebb/lrai_locate_anything"
+Issues = "https://github.com/deanofthewebb/lrai_locate_anything/issues"
+
+[tool.setuptools.packages.find]
+include = ["lrai_locate_anything*"]

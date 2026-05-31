@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Workdir artefacts (downloads + engines + intermediate ONNX)
+**/locany/
+**/weights/
+**/onnx/
+**/engines/
+**/trtllm_ckpt/
+**/trtllm_engine/
+**/*.engine
+**/*.onnx
+**/*.onnx.bin
+**/*.safetensors
+**/*.bin
+demo_boxed.mp4
+demo_compare.mp4
+custom_demo.mp4
+
+# Logs
+*.log
