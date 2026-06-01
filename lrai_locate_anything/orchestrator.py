@@ -1169,6 +1169,42 @@ class LocateAnythingRunner:
         except Exception:
             current_fp = "<compute failed>"
 
+        # Package version + commit (so we can verify the user is running the
+        # latest pushed code on Colab, not a stale pip cache).
+        try:
+            import lrai_locate_anything as _lra
+            pkg_version = getattr(_lra, "__version__", "?")
+        except Exception:
+            pkg_version = "?"
+        try:
+            # If installed from a git URL, pip records the commit in METADATA;
+            # this is the most reliable way to tell what's actually loaded.
+            import subprocess
+            _pi = subprocess.run(["pip", "show", "lrai_locate_anything"],
+                                   capture_output=True, text=True, timeout=5).stdout
+            pkg_location = next((L.split(":", 1)[1].strip()
+                                 for L in _pi.split("\n")
+                                 if L.startswith("Location")), "?")
+        except Exception:
+            pkg_location = "?"
+
+        # Engine load status — without this we can't tell whether the
+        # dual-engine fix (b8fe1dd) is actually active. If decode_ar is None
+        # while decode is loaded, the runtime is silently running the old
+        # single-engine path with the MTP branch baked everywhere.
+        eng_status = {
+            "vit_engine": "loaded" if self.vit_engine else "MISSING",
+            "proj_engine": "loaded" if self.proj_engine else "MISSING",
+            "prefill_engine": "loaded" if self.prefill_engine else "MISSING",
+            "decode_engine_mtp": "loaded" if self.decode_engine else "MISSING",
+            "decode_engine_ar": "loaded" if self.decode_engine_ar else "MISSING",
+        }
+        # Engine files on disk (separate from "loaded in memory")
+        try:
+            engine_files = sorted([p.name for p in TRT_DIR.iterdir() if p.suffix == ".engine"])
+        except Exception:
+            engine_files = []
+
         sections = [
             f"# prompt:           {prompt}",
             f"# path:             {path_used}",
@@ -1191,6 +1227,12 @@ class LocateAnythingRunner:
             f"# tensorrt:         {_trt_v}",
             f"# REF_DTYPE:        {REF_DTYPE}",
             f"# model.dtype:      {next(self.model.parameters()).dtype if self.model is not None else 'n/a'}",
+            f"# lrai_locate_anything: version={pkg_version}  location={pkg_location}",
+            f"",
+            f"# === TRT engine load status ===",
+            *[f"# {k}: {v}" for k, v in eng_status.items()],
+            f"# engine files on disk in {TRT_DIR}: {engine_files}",
+            f"# decode_ar required for the dual-engine fix (b8fe1dd); MISSING means TRT is running with the wrong branch baked for AR/rebuild steps",
             f"",
             f"# === pt weights sanity (in-memory, AT DUMP TIME) ===",
             f"# embed: mean={embed_mean:+.5f} std={embed_std:.5f}   (trained ~0.024, random init ~0.020)",
