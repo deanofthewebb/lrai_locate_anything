@@ -156,25 +156,73 @@ def _ensure_lm_head_tied(model, verbose: bool = True) -> bool:
               f"head(mean={h.mean().item():+.4f}, std={h.std().item():.4f})")
 
     if tie_flag and not tied_before:
-        # Prefer the model's own tie_weights() if available; fall back to direct assignment.
+        # Try a cascade of tie methods, from gentle to nuclear. After each attempt
+        # re-check; first one that produces a tied (or at least equal) head wins.
+        def _check():
+            h_now = getattr(lm, "lm_head").weight
+            e_now = embed.weight
+            return (
+                e_now.data_ptr() == h_now.data_ptr(),
+                bool((e_now.shape == h_now.shape) and torch.equal(e_now.data, h_now.data)),
+            )
+
+        attempts = []
+
+        # 1. Outer-model tie_weights() — usually a no-op for this model because the
+        #    outer __init__ skips post_init, but harmless to try.
         try:
             model.tie_weights()
+            attempts.append(("model.tie_weights()", *_check()))
         except Exception as _e:
-            if verbose:
-                print(f"[loader] model.tie_weights() raised ({_e!r}); falling back to direct assignment")
-            head.weight = embed.weight  # share storage
-        # Re-fetch in case tie_weights replaced the module
-        head = getattr(lm, "lm_head", head)
-        h = head.weight
-        tied_after = (e.data_ptr() == h.data_ptr())
-        equal_after = bool((e.shape == h.shape) and torch.equal(e.data, h.data))
+            attempts.append((f"model.tie_weights() raised {_e!r}", False, False))
+
+        # 2. Inner language_model.tie_weights() — Qwen2ForCausalLM has its own
+        #    implementation that respects config.tie_word_embeddings.
+        if not any(t for _, t, _ in attempts):
+            try:
+                lm.tie_weights()
+                attempts.append(("language_model.tie_weights()", *_check()))
+            except Exception as _e:
+                attempts.append((f"language_model.tie_weights() raised {_e!r}", False, False))
+
+        # 3. Direct parameter assignment — `head.weight = embed.weight` should make
+        #    them share storage, since nn.Module.__setattr__ rebinds the Parameter.
+        if not any(t for _, t, _ in attempts):
+            head_module = getattr(lm, "lm_head")
+            head_module.weight = embed.weight
+            attempts.append(("head.weight = embed.weight", *_check()))
+
+        # 4. NUCLEAR: replace the entire lm_head module with a fresh nn.Linear whose
+        #    weight IS the embed weight. This is bulletproof — if the original
+        #    lm_head module somehow rejects parameter assignment, this bypasses it.
+        if not any(t for _, t, _ in attempts):
+            import torch.nn as _nn
+            vocab_size, hidden_size = embed.weight.shape
+            new_head = _nn.Linear(
+                hidden_size, vocab_size, bias=False,
+                device=embed.weight.device, dtype=embed.weight.dtype,
+            )
+            new_head.weight = embed.weight  # share storage
+            lm.lm_head = new_head
+            attempts.append(("nuclear replacement of lm_head", *_check()))
+
+        # Final state
+        tied_final, equal_final = _check()
         if verbose:
-            status = "OK" if tied_after else ("EQUAL-NOT-TIED" if equal_after else "STILL-BROKEN")
-            print(f"[loader] tie_check AFTER:  tied={tied_after}  equal={equal_after}  [{status}]")
-        if not (tied_after or equal_after):
-            print("[loader] WARN: lm_head still not tied to embed_tokens after tie_weights().")
-            print("[loader]       Forcing head.weight = embed.weight (shared storage).")
-            head.weight = embed.weight
+            status = "OK" if tied_final else ("EQUAL-NOT-TIED" if equal_final else "STILL-BROKEN")
+            head_now = lm.lm_head.weight
+            print(f"[loader] tie_check AFTER:  tied={tied_final}  equal={equal_final}  [{status}]")
+            for name, t, eq in attempts:
+                print(f"[loader]                   {name}: tied={t} equal={eq}")
+            print(f"[loader]                   final head(mean={head_now.mean().item():+.4f}, std={head_now.std().item():.4f})")
+
+        if not (tied_final or equal_final):
+            raise RuntimeError(
+                "Failed to tie lm_head.weight to embed_tokens.weight after 4 attempts.\n"
+                "  attempts: " + " | ".join(f"{n}({t},{eq})" for n, t, eq in attempts) + "\n"
+                "Cannot proceed — model would produce <ref>$$$$$ mode-collapse on every "
+                "generation path. Open an issue with the [loader] tie_check logs above."
+            )
         return True  # model was rescued — caller must invalidate cached engines
     return False
 

@@ -14,31 +14,43 @@ import pytest
 torch = pytest.importorskip("torch")
 
 
-def _make_fake_model(tied: bool, tie_flag: bool = True, vocab: int = 1000, dim: int = 64):
-    """Build a minimal model with .language_model.model.embed_tokens + .language_model.lm_head."""
+def _make_fake_model(tied: bool, tie_flag: bool = True, vocab: int = 1000, dim: int = 64,
+                      outer_tie_works: bool = True, inner_tie_works: bool = True):
+    """Build a minimal model with .language_model.model.embed_tokens + .language_model.lm_head.
+
+    outer_tie_works/inner_tie_works toggle whether the model.tie_weights() and
+    language_model.tie_weights() calls actually do anything — used to exercise
+    the cascade fallback. Real LocateAnythingForConditionalGeneration has
+    outer_tie_works=False because post_init is skipped.
+    """
     embed = torch.nn.Embedding(vocab, dim)
     head = torch.nn.Linear(dim, vocab, bias=False)
-    # Initialise embed with non-trivial values
     torch.nn.init.normal_(embed.weight, mean=0.0, std=0.05)
-    # Initialise head with very different stats so the test is unambiguous
     torch.nn.init.normal_(head.weight, mean=0.0, std=0.02)
     if tied:
-        head.weight = embed.weight  # shared storage
+        head.weight = embed.weight
 
-    class _LMMain:
-        pass
-    class _LM:
-        pass
     class _Cfg:
-        class text_config: pass
+        class text_config:
+            pass
     cfg = _Cfg()
     cfg.text_config.tie_word_embeddings = tie_flag
 
+    class _LMMain(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = embed
     lm_main = _LMMain()
-    lm_main.embed_tokens = embed
+
+    class _LM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = lm_main
+            self.lm_head = head
+        def tie_weights(self):
+            if inner_tie_works:
+                self.lm_head.weight = self.model.embed_tokens.weight
     lm = _LM()
-    lm.model = lm_main
-    lm.lm_head = head
 
     class _Model(torch.nn.Module):
         def __init__(self):
@@ -46,9 +58,8 @@ def _make_fake_model(tied: bool, tie_flag: bool = True, vocab: int = 1000, dim: 
             self.language_model = lm
             self.config = cfg
         def tie_weights(self):
-            # mimic transformers' behaviour when post_init was skipped:
-            # by default this is a no-op (or fails) — the fallback path takes over.
-            self.language_model.lm_head.weight = self.language_model.model.embed_tokens.weight
+            if outer_tie_works:
+                self.language_model.lm_head.weight = self.language_model.model.embed_tokens.weight
 
     return _Model()
 
@@ -105,6 +116,32 @@ class TestEnsureLmHeadTied:
         m.tie_weights = _broken
         rescued = _ensure_lm_head_tied(m, verbose=False)
         assert rescued is True
+        assert (m.language_model.model.embed_tokens.weight.data_ptr()
+                == m.language_model.lm_head.weight.data_ptr())
+
+    def test_cascade_uses_nuclear_when_outer_and_inner_fail(self):
+        """When both outer model.tie_weights() AND inner language_model.tie_weights()
+        are no-ops (i.e. the bug we have in production), the cascade should still
+        succeed via the direct-assignment or nuclear-replacement step."""
+        from lrai_locate_anything.model_loader import _ensure_lm_head_tied
+        m = _make_fake_model(tied=False, tie_flag=True,
+                              outer_tie_works=False, inner_tie_works=False)
+        rescued = _ensure_lm_head_tied(m, verbose=False)
+        assert rescued is True
+        # Must end with shared storage (tied), NOT just equal-by-value
+        e_ptr = m.language_model.model.embed_tokens.weight.data_ptr()
+        h_ptr = m.language_model.lm_head.weight.data_ptr()
+        assert e_ptr == h_ptr, "cascade did not produce shared-storage tying"
+
+    def test_no_silent_fallback_when_inner_works(self):
+        """Per user direction: NO silent fallbacks to random init. When the cascade
+        succeeds, ptrs must be shared (not just equal-by-value). Tests the
+        inner_tie path which is what should fire for production models."""
+        from lrai_locate_anything.model_loader import _ensure_lm_head_tied
+        m = _make_fake_model(tied=False, tie_flag=True,
+                              outer_tie_works=False, inner_tie_works=True)
+        _ensure_lm_head_tied(m, verbose=False)
+        # Storage MUST be shared, not just value-equal
         assert (m.language_model.model.embed_tokens.weight.data_ptr()
                 == m.language_model.lm_head.weight.data_ptr())
 
