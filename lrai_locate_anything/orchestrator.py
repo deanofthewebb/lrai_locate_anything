@@ -275,16 +275,31 @@ class _TRTGenerator:
                 past = [t[:, :, :P, :] for t in nxt]  # truncate to pre-MTP
                 if pat.get("is_terminal") or int(self.r.TID["im_end_token_id"]) in toks:
                     break
-                # Re-run committed tokens through decode engine to refill kv with
-                # the correct (non-mask) attention states.
+                # Re-run committed tokens through decode to refill kv with the
+                # correct (non-mask) attention states.
+                #
+                # CRITICAL: must use the PyTorch decode here, NOT the TRT engine.
+                # The TRT decode engine was exported with the last input token
+                # set to text_mask_token_id (export/llm.py:195), which causes
+                # modeling_qwen2.py:1279's data-dependent branch
+                #     if seq_length == 1 or input_ids[0][-1].item() != mask_id
+                # to constant-fold to the MTP block-mask path. dynamo=False
+                # bakes that branch decision into the ONNX graph, so the engine
+                # ALWAYS runs the mask-branch attention regardless of runtime
+                # inputs. Feeding it our real committed tokens corrupts the KV.
+                # PyTorch reevaluates the branch every forward and takes the
+                # correct AR path for real tokens.
                 rebuild_pos = np.arange(P, P + len(toks), dtype=np.int64)[None, :]
                 rebuild_att = np.ones((1, P + len(toks)), dtype=np.int64)
-                _, past = self._decode(tnp, rebuild_pos, rebuild_att, past)
+                _, past = self._decode_pt(tnp, rebuild_pos, rebuild_att, past)
             else:
                 last_id = generated[:, -1:]
                 pos = np.array([[P]], dtype=np.int64)
                 att = np.ones((1, P + 1), dtype=np.int64)
-                logits_o, nxt = self._decode(last_id, pos, att, past)
+                # Same reason as the MTP-commit rebuild above: AR feeds a single
+                # real (non-mask) token, but the TRT decode engine has the
+                # mask-branch baked in. Use PyTorch for the correct branch.
+                logits_o, nxt = self._decode_pt(last_id, pos, att, past)
                 lt = torch.from_numpy(logits_o.astype(np.float32))
                 gt = torch.from_numpy(generated).long()
                 probs, conf, x0, *_ = sample_tokens_ar(
