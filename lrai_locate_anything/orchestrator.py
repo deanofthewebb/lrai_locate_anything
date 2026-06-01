@@ -14,9 +14,53 @@ import numpy as np
 import torch
 from PIL import Image
 
+import re
 from .config import MODEL_ID, REF_DTYPE, WORK, ONNX_DIR, TRT_DIR, enable_llm_trt, ensure_nvidia_stack
 from .model_loader import load_locateanything_3b, normalize_image_grid_hws, lock_processor_resolution
 from .parse import parse_boxes, python_patch_merger
+
+
+# ---------------------------------------------------------------------------
+# Prompt auto-canonicalization
+# ---------------------------------------------------------------------------
+_CANONICAL_PREFIX = "Locate all the instances that matches the following description: "
+
+def canonicalize_prompt(prompt: str) -> Tuple[str, bool]:
+    """Rewrite natural-language prompts to the model's canonical training phrasing.
+
+    LocateAnything-3B was trained exclusively on prompts of the form
+        "Locate all the instances that matches the following description: X."
+    where X is a single category or "<cat1></c><cat2>" for multi-class. OOD
+    phrasings like "Detect all cats. Return bounding boxes." cause the MTP head
+    to mode-collapse on the mask token. This helper extracts the object
+    description from common natural-language phrasings and reformats to canonical.
+
+    Returns (rewritten_prompt, was_rewritten).
+    """
+    p = prompt.strip()
+    if "matches the following description:" in p.lower():
+        return p, False
+    # Strip boilerplate suffix ("Return bounding boxes", "Please provide", etc.)
+    p = re.sub(r"[\.,]?\s*(return|provide|give|find|with|please)\s+(bounding\s+box(es)?|boxes|coordinates)\s*\.?\s*$",
+               "", p, flags=re.I)
+    p = re.sub(r"\s*\.\s*$", "", p)
+    # Extract the object after a detection verb
+    m = re.match(
+        r"^(?:please\s+)?"
+        r"(?:detect|find|locate|bound|identify|ground|point\s+(?:to|at)|where\s+(?:are|is)|show\s+me|spot)"
+        r"\s+(?:all\s+|every\s+|the\s+|any\s+|each\s+|me\s+the\s+)?(.+)$",
+        p, re.I,
+    )
+    if not m:
+        return prompt, False
+    target = m.group(1).strip()
+    # Multi-class join: "cats and dogs", "people, cars and bikes" -> "cat</c>dog", etc.
+    target = re.sub(r",?\s+and\s+|,\s*", "</c>", target)
+    # Trim trailing punctuation
+    target = re.sub(r"[\.\?!]+\s*$", "", target).strip()
+    if not target:
+        return prompt, False
+    return _CANONICAL_PREFIX + target + ".", True
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +533,20 @@ class LocateAnythingRunner:
         if isinstance(image, (str, Path)):
             image = Image.open(image).convert("RGB")
         orig_w, orig_h = image.size
+
+        # Auto-canonicalize OOD prompts. The model is trained on a specific phrasing;
+        # natural-language alternatives like "Detect all cats. Return bounding boxes."
+        # cause MTP mode-collapse. We rewrite transparently.
+        canonical_prompt, rewritten = canonicalize_prompt(prompt)
+        if rewritten and (diagnostic or verbose):
+            print(f"[detect] prompt auto-canonicalized:")
+            print(f"          input:     {prompt!r}")
+            print(f"          rewritten: {canonical_prompt!r}")
+        elif not rewritten and "matches the following description:" not in prompt.lower():
+            print(f"[detect] WARN: prompt is not in canonical form; model may produce")
+            print(f"          degenerate output. Canonical form is:")
+            print(f"          'Locate all the instances that matches the following description: <X>.'")
+        prompt = canonical_prompt
 
         # 1) TRT path
         boxes_eng, text = self._detect_via_trt(image, prompt, max_new_tokens, generation_mode)
