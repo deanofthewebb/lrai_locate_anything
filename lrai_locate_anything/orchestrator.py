@@ -378,11 +378,24 @@ class LocateAnythingRunner:
         if auto_export:
             current_fp = runner._model_fingerprint()
             stale_fp = runner._cached_artifacts_fingerprint()
-            mismatched = (stale_fp is not None and stale_fp != current_fp)
+            engines_on_disk = any(
+                (TRT_DIR / f).exists()
+                for f in ("vision.engine", "projector.engine", "llm_prefill.engine", "llm_decode.engine")
+            )
+            # Wipe if ANY of these is true:
+            #   - explicit force_reexport
+            #   - lm_head was rescued this load (model state changed)
+            #   - cached fingerprint doesn't match the current model
+            #   - engines exist on disk WITHOUT a fingerprint stamp (pre-fingerprint
+            #     artifacts — assume stale because we have no way to verify they
+            #     match the current model)
             reasons = []
             if force_reexport: reasons.append("force_reexport")
             if rescued:        reasons.append("lm_head rescued")
-            if mismatched:     reasons.append(f"fingerprint mismatch (cached={stale_fp[:12]} current={current_fp[:12]})")
+            if stale_fp is not None and stale_fp != current_fp:
+                reasons.append(f"fingerprint mismatch (cached={stale_fp[:12]} current={current_fp[:12]})")
+            elif stale_fp is None and engines_on_disk:
+                reasons.append("engines on disk without fingerprint (pre-fingerprint artifacts, assumed stale)")
             if reasons:
                 runner._wipe_stale_artifacts(reason="; ".join(reasons))
             runner.export_engines(sample_image=sample_image, sample_prompt=sample_prompt)
