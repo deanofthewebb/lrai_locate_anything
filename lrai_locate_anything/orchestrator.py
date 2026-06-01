@@ -899,36 +899,38 @@ class LocateAnythingRunner:
         attn_mask = enc["attention_mask"]
 
         # ---------------- VISION ----------------
+        # Canonical (modeling_vit.MoonVitPretrainedModel.forward) ALREADY applies
+        # the 2x2 patch merger internally, so vision_model returns the same
+        # (L_post, D) tensor that our TRT [vit_engine + python_patch_merger]
+        # produces. Compare those directly — no extra merger on the PT side.
         px_np = pixel_values.detach().float().cpu().numpy().astype(np.float16)
         with torch.inference_mode():
             pt_vit_out = self.model.vision_model(
                 pixel_values=pixel_values.to(self.model.dtype), grid_hws=grid_hws,
             )
-        # pt_vit_out may be a tensor or a tuple/list depending on the vendored module
+        # vision_model returns either a Tensor or a list-of-Tensors (per-image).
+        # The canonical generate concatenates the list. With batch=1, it's a
+        # single (L_post, D) tensor.
         if hasattr(pt_vit_out, "last_hidden_state"):
-            pt_vit_t = pt_vit_out.last_hidden_state
+            pt_vit_post = pt_vit_out.last_hidden_state
         elif isinstance(pt_vit_out, (list, tuple)):
-            pt_vit_t = torch.cat([t for t in pt_vit_out], dim=0) if isinstance(pt_vit_out[0], torch.Tensor) else torch.as_tensor(pt_vit_out)
+            pt_vit_post = torch.cat([t for t in pt_vit_out], dim=0)
         else:
-            pt_vit_t = pt_vit_out
-        # TRT vision (engine + python merger applied inside _vision)
-        trt_vit_np = self._gen._vision(px_np)  # (L_post, D)
+            pt_vit_post = pt_vit_out
+        trt_vit_np = self._gen._vision(px_np)  # (L_post, D), uses python_patch_merger
         trt_vit_t = torch.from_numpy(trt_vit_np.astype(np.float32))
-        # PT post-merger to match TRT's L_post
-        gh_np = np.array([[self.grid_h, self.grid_w]], dtype=np.int32)
-        pt_vit_merged = python_patch_merger(pt_vit_t.detach().float().cpu().numpy(), gh_np, kh=2, kw=2)
-        pt_vit_merged_t = torch.from_numpy(pt_vit_merged.astype(np.float32))
+        pt_vit_t = pt_vit_post.detach().float().cpu()  # already post-merger
         lines.append("")
         lines.append("[vision encoder output, post-2x2 merger]")
-        lines.append(_stats("TRT vit+merger",   trt_vit_t))
-        lines.append(_stats("PT  vit+merger",   pt_vit_merged_t))
-        lines.append(_compare("vit diff",         trt_vit_t, pt_vit_merged_t))
+        lines.append(_stats("TRT vit+merger", trt_vit_t))
+        lines.append(_stats("PT  vision_model", pt_vit_t))
+        lines.append(_compare("vit diff", trt_vit_t, pt_vit_t))
 
         # ---------------- PROJECTOR ----------------
         trt_proj_np = self._gen._project(trt_vit_np)  # uses TRT proj_engine on TRT vit
         trt_proj_t = torch.from_numpy(trt_proj_np.astype(np.float32))
         with torch.inference_mode():
-            pt_proj_t = self.model.mlp1(pt_vit_merged_t.to(self.model.dtype).to(self.model.device))
+            pt_proj_t = self.model.mlp1(pt_vit_post.to(self.model.dtype).to(self.model.device))
         lines.append("")
         lines.append("[projector output (visual features fed to LM)]")
         lines.append(_stats("TRT proj",  trt_proj_t))
