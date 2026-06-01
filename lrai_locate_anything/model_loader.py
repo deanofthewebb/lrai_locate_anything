@@ -95,11 +95,81 @@ def load_locateanything_3b(
             f"lm={sum(p.numel() for p in model.language_model.parameters())/1e9:.2f} B)"
         )
 
+    # ------------------------------------------------------------------
+    # CRITICAL: tie lm_head.weight to embed_tokens.weight.
+    # The vendored LocateAnythingForConditionalGeneration.__init__ explicitly
+    # SKIPS post_init() (see shims.mark_tied_weights_as_initialized comment),
+    # so transformers never calls tie_weights() automatically. For Qwen2.5-3B
+    # with tie_word_embeddings=True, the safetensors checkpoint contains ONLY
+    # embed_tokens.weight — lm_head is expected to be tied at load time.
+    # Without this call, lm_head.weight remains at random init, and the LM
+    # produces structural tokens (<ref>) followed by a high-bias random-token
+    # loop ($$$$$ / """"") on EVERY generation path (TRT, PT, patched, unpatched).
+    # ------------------------------------------------------------------
+    _ensure_lm_head_tied(model, verbose=verbose)
+
     patches_snapshot = None
     if apply_patches:
         patches_snapshot = apply_vision_patches(model, verbose=verbose)
 
     return model, tokenizer, processor, config, local, patches_snapshot
+
+
+def _ensure_lm_head_tied(model, verbose: bool = True) -> None:
+    """Tie lm_head.weight to embed_tokens.weight when tie_word_embeddings=True.
+
+    Diagnoses and fixes the silent-mode-collapse failure where the model emits
+    <ref>$$$$$<ref>$$$$$... because lm_head was never initialized from the
+    checkpoint (it was supposed to be tied at load time, but post_init was skipped).
+
+    Logs BEFORE and AFTER stats so the fix is visible.
+    """
+    lm = getattr(model, "language_model", None)
+    if lm is None:
+        if verbose:
+            print("[loader] WARN: no model.language_model — skipping tie check")
+        return
+    lm_main = getattr(lm, "model", lm)
+    embed = getattr(lm_main, "embed_tokens", None)
+    head = getattr(lm, "lm_head", None)
+    if embed is None or head is None:
+        if verbose:
+            print(f"[loader] WARN: cannot locate embed_tokens or lm_head (embed={embed!r}, head={head!r})")
+        return
+
+    tie_flag = getattr(getattr(model.config, "text_config", None), "tie_word_embeddings", None)
+    if tie_flag is None:
+        tie_flag = getattr(model.config, "tie_word_embeddings", False)
+
+    e, h = embed.weight, head.weight
+    tied_before = (e.data_ptr() == h.data_ptr())
+    equal_before = bool((e.shape == h.shape) and torch.equal(e.data, h.data))
+    if verbose:
+        print(f"[loader] tie_check BEFORE: tie_word_embeddings={tie_flag}  "
+              f"tied={tied_before}  equal={equal_before}  "
+              f"embed(mean={e.mean().item():+.4f}, std={e.std().item():.4f}) "
+              f"head(mean={h.mean().item():+.4f}, std={h.std().item():.4f})")
+
+    if tie_flag and not tied_before:
+        # Prefer the model's own tie_weights() if available; fall back to direct assignment.
+        try:
+            model.tie_weights()
+        except Exception as _e:
+            if verbose:
+                print(f"[loader] model.tie_weights() raised ({_e!r}); falling back to direct assignment")
+            head.weight = embed.weight  # share storage
+        # Re-fetch in case tie_weights replaced the module
+        head = getattr(lm, "lm_head", head)
+        h = head.weight
+        tied_after = (e.data_ptr() == h.data_ptr())
+        equal_after = bool((e.shape == h.shape) and torch.equal(e.data, h.data))
+        if verbose:
+            status = "OK" if tied_after else ("EQUAL-NOT-TIED" if equal_after else "STILL-BROKEN")
+            print(f"[loader] tie_check AFTER:  tied={tied_after}  equal={equal_after}  [{status}]")
+        if not (tied_after or equal_after):
+            print("[loader] WARN: lm_head still not tied to embed_tokens after tie_weights().")
+            print("[loader]       Forcing head.weight = embed.weight (shared storage).")
+            head.weight = embed.weight
 
 
 def normalize_image_grid_hws(inputs: dict, pixel_values_key: str = "pixel_values"):
