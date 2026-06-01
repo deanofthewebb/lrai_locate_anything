@@ -564,4 +564,23 @@ class LocateAnythingRunner:
             else:
                 print(f"[detect] WARN: <box> present in raw but parse_boxes returned []. Check the regex.")
 
+        # On Colab, auto-trigger a browser download of the diagnostic dump when
+        # detection fails so the user can share it with the maintainer without
+        # having to navigate the Files panel manually.
+        if diagnostic and len(boxes) == 0:
+            self._maybe_trigger_colab_download(WORK / "last_inference.txt")
+
         return boxes, text
+
+    @staticmethod
+    def _maybe_trigger_colab_download(path) -> None:
+        """If running on Colab, trigger a browser download of `path`. No-op elsewhere."""
+        try:
+            from google.colab import files as _gfiles  # type: ignore
+        except ImportError:
+            return
+        try:
+            _gfiles.download(str(path))
+            print(f"[detect] auto-downloaded {path} to your local Downloads folder")
+        except Exception as e:
+            print(f"[detect] download trigger failed (file still at {path}): {e}")
