@@ -356,22 +356,44 @@ class LocateAnythingRunner:
         auto_export: bool = False,
         sample_image: Optional[Path] = None,
         sample_prompt: str = "Locate all the instances that matches the following description: cat.",
+        force_reexport: bool = False,
     ) -> "LocateAnythingRunner":
         """Load model + (optionally) export and build engines on first run.
 
         For auto_export=True, supply a sample_image whose resolution will determine
         the baked engine size. If None, a tiny default image is used (grid 36x46).
+
+        If `force_reexport=True` OR the model loader had to rescue lm_head (any
+        cached engines on disk were built from a random lm_head and are corrupt),
+        all stale ONNX + TRT artifacts are wiped before re-export.
         """
         ensure_nvidia_stack(verbose=False)
         model, tokenizer, processor, config, local, snap = load_locateanything_3b(
             local_dir=local_dir, model_id=model_id,
         )
         runner = cls(model, tokenizer, processor, config, local, patches_snapshot=snap)
+        rescued = bool(getattr(model, "_locany_lm_head_was_rescued", False))
         if auto_export:
+            if force_reexport or rescued:
+                runner._wipe_stale_artifacts(reason=("force_reexport" if force_reexport else "lm_head rescued"))
             runner.export_engines(sample_image=sample_image, sample_prompt=sample_prompt)
             runner.build_engines()
             runner.load_engines()
         return runner
+
+    def _wipe_stale_artifacts(self, reason: str = "") -> None:
+        """Remove cached ONNX + TRT artifacts. Used when the model state has changed
+        in a way that invalidates anything baked from a prior session.
+        """
+        import shutil
+        for d in (ONNX_DIR, TRT_DIR):
+            if d.exists():
+                items = [p for p in d.iterdir() if p.is_file()]
+                if items:
+                    print(f"[runner] wiping {len(items)} stale artifact(s) in {d} ({reason})")
+                    for p in items:
+                        p.unlink()
+            d.mkdir(parents=True, exist_ok=True)
 
     # ----- export + build -----
     def _processor_call(self, image: Image.Image, prompt: str) -> dict:
@@ -454,6 +476,22 @@ class LocateAnythingRunner:
 
     def load_engines(self):
         from .trt.engine import TRTEngine
+        # Guard: if the loader rescued lm_head this session AND TRT engines exist
+        # on disk that were built BEFORE this rescue, they were exported from a
+        # random lm_head and are corrupt. Refuse to load silently.
+        rescued = bool(getattr(self.model, "_locany_lm_head_was_rescued", False))
+        stale_llm = any((TRT_DIR / f).exists() for f in ("llm_prefill.engine", "llm_decode.engine"))
+        if rescued and stale_llm and self.prefill_engine is None and self.decode_engine is None:
+            # `prefill/decode_engine is None` means we haven't built+loaded fresh ones this session
+            raise RuntimeError(
+                "Cached TRT LLM engines exist on disk but the loaded model required "
+                "lm_head tying (random-init lm_head detected). The cached engines were "
+                "built from the broken model and would produce mode-collapse. "
+                "Either run from_pretrained(auto_export=True) to re-export, or call "
+                ".export_engines()+.build_engines() explicitly. As a one-liner, run\n"
+                "    runner._wipe_stale_artifacts('manual reset'); runner.export_engines(); "
+                "runner.build_engines(); runner.load_engines()"
+            )
         if (TRT_DIR / "vision.engine").exists():
             self.vit_engine = TRTEngine(TRT_DIR / "vision.engine")
         if (TRT_DIR / "projector.engine").exists():

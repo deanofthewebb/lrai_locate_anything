@@ -106,7 +106,10 @@ def load_locateanything_3b(
     # produces structural tokens (<ref>) followed by a high-bias random-token
     # loop ($$$$$ / """"") on EVERY generation path (TRT, PT, patched, unpatched).
     # ------------------------------------------------------------------
-    _ensure_lm_head_tied(model, verbose=verbose)
+    was_rescued = _ensure_lm_head_tied(model, verbose=verbose)
+    # Stash the rescue flag on the model so the runner can invalidate any TRT
+    # engines that were built from the broken-lm_head model in a prior session.
+    model._locany_lm_head_was_rescued = was_rescued
 
     patches_snapshot = None
     if apply_patches:
@@ -115,27 +118,29 @@ def load_locateanything_3b(
     return model, tokenizer, processor, config, local, patches_snapshot
 
 
-def _ensure_lm_head_tied(model, verbose: bool = True) -> None:
+def _ensure_lm_head_tied(model, verbose: bool = True) -> bool:
     """Tie lm_head.weight to embed_tokens.weight when tie_word_embeddings=True.
 
     Diagnoses and fixes the silent-mode-collapse failure where the model emits
     <ref>$$$$$<ref>$$$$$... because lm_head was never initialized from the
     checkpoint (it was supposed to be tied at load time, but post_init was skipped).
 
-    Logs BEFORE and AFTER stats so the fix is visible.
+    Logs BEFORE and AFTER stats so the fix is visible. Returns True iff the model
+    needed rescuing (lm_head was untied and we tied it) — the caller uses this to
+    invalidate any cached TRT engines that were built from the broken model.
     """
     lm = getattr(model, "language_model", None)
     if lm is None:
         if verbose:
             print("[loader] WARN: no model.language_model — skipping tie check")
-        return
+        return False
     lm_main = getattr(lm, "model", lm)
     embed = getattr(lm_main, "embed_tokens", None)
     head = getattr(lm, "lm_head", None)
     if embed is None or head is None:
         if verbose:
             print(f"[loader] WARN: cannot locate embed_tokens or lm_head (embed={embed!r}, head={head!r})")
-        return
+        return False
 
     tie_flag = getattr(getattr(model.config, "text_config", None), "tie_word_embeddings", None)
     if tie_flag is None:
@@ -170,6 +175,8 @@ def _ensure_lm_head_tied(model, verbose: bool = True) -> None:
             print("[loader] WARN: lm_head still not tied to embed_tokens after tie_weights().")
             print("[loader]       Forcing head.weight = embed.weight (shared storage).")
             head.weight = embed.weight
+        return True  # model was rescued — caller must invalidate cached engines
+    return False
 
 
 def normalize_image_grid_hws(inputs: dict, pixel_values_key: str = "pixel_values"):
