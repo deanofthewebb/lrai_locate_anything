@@ -470,6 +470,7 @@ class LocateAnythingRunner:
         build_vision(ONNX_DIR / "vision.onnx", TRT_DIR / "vision.engine", L_pre)
         build_projector(ONNX_DIR / "projector.onnx", TRT_DIR / "projector.engine", L_post)
         if not llm:
+            self._llm_engines_rebuilt_this_session = False
             return
         if not enable_llm_trt():
             raise RuntimeError(
@@ -484,24 +485,29 @@ class LocateAnythingRunner:
             hidden_size=self.hidden_size, n_layers=self.n_layers,
             n_kv_heads=self.n_kv_heads, head_dim=self.head_dim,
         )
+        # Stamp the runner so load_engines() knows the .engine files on disk
+        # were built FROM the in-memory (rescued or not) model this session,
+        # not inherited from a prior session with a broken lm_head.
+        self._llm_engines_rebuilt_this_session = True
 
     def load_engines(self):
         from .trt.engine import TRTEngine
-        # Guard: if the loader rescued lm_head this session AND TRT engines exist
-        # on disk that were built BEFORE this rescue, they were exported from a
-        # random lm_head and are corrupt. Refuse to load silently.
+        # Guard against loading STALE engines: if the loader rescued lm_head this
+        # session AND we did NOT also rebuild the LLM engines this session, the
+        # .engine files on disk came from a prior session with a broken lm_head.
         rescued = bool(getattr(self.model, "_locany_lm_head_was_rescued", False))
-        stale_llm = any((TRT_DIR / f).exists() for f in ("llm_prefill.engine", "llm_decode.engine"))
-        if rescued and stale_llm and self.prefill_engine is None and self.decode_engine is None:
-            # `prefill/decode_engine is None` means we haven't built+loaded fresh ones this session
+        rebuilt_this_session = bool(getattr(self, "_llm_engines_rebuilt_this_session", False))
+        llm_engines_on_disk = any((TRT_DIR / f).exists() for f in ("llm_prefill.engine", "llm_decode.engine"))
+        if rescued and llm_engines_on_disk and not rebuilt_this_session:
             raise RuntimeError(
                 "Cached TRT LLM engines exist on disk but the loaded model required "
-                "lm_head tying (random-init lm_head detected). The cached engines were "
-                "built from the broken model and would produce mode-collapse. "
-                "Either run from_pretrained(auto_export=True) to re-export, or call "
-                ".export_engines()+.build_engines() explicitly. As a one-liner, run\n"
-                "    runner._wipe_stale_artifacts('manual reset'); runner.export_engines(); "
-                "runner.build_engines(); runner.load_engines()"
+                "lm_head tying (random-init lm_head detected) AND the LLM engines were "
+                "NOT rebuilt in this session. The cached engines were built from the "
+                "broken model and would produce mode-collapse. To recover:\n"
+                "    runner._wipe_stale_artifacts('manual reset')\n"
+                "    runner.export_engines()\n"
+                "    runner.build_engines()\n"
+                "    runner.load_engines()"
             )
         if (TRT_DIR / "vision.engine").exists():
             self.vit_engine = TRTEngine(TRT_DIR / "vision.engine")

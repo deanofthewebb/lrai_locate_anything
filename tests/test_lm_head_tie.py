@@ -148,6 +148,80 @@ class TestEnsureLmHeadTied:
                 == m.language_model.lm_head.weight.data_ptr())
 
 
+class TestLoadEnginesStaleGuard:
+    """The load_engines guard must:
+      - RAISE when rescued AND engines on disk AND NOT rebuilt this session
+      - NOT raise when rescued AND engines on disk AND rebuilt this session
+        (the engines on disk ARE the freshly-built ones from the tied model)
+    """
+
+    def _make_runner_like(self, tmp_path, monkeypatch, rescued: bool, rebuilt: bool,
+                           with_engines_on_disk: bool):
+        # Stub tensorrt + the lrai_locate_anything.trt.engine module so that the
+        # `from .trt.engine import TRTEngine` inside load_engines() resolves
+        # without requiring TensorRT to be installed. monkeypatch.setitem on
+        # sys.modules auto-restores after the test — no leakage into other tests.
+        import sys, types
+        for name in ("tensorrt", "pycuda", "pycuda.autoinit", "pycuda.driver"):
+            monkeypatch.setitem(sys.modules, name, types.SimpleNamespace())
+        stub_engine = types.ModuleType("lrai_locate_anything.trt.engine")
+        class _StubEngine:
+            def __init__(self, *a, **kw): pass
+        stub_engine.TRTEngine = _StubEngine
+        def _stub_get_trt_logger(level="WARNING"): return None
+        stub_engine.get_trt_logger = _stub_get_trt_logger
+        monkeypatch.setitem(sys.modules, "lrai_locate_anything.trt.engine", stub_engine)
+
+        from lrai_locate_anything import orchestrator
+        onnx = tmp_path / "onnx"
+        trt = tmp_path / "trt"
+        onnx.mkdir(); trt.mkdir()
+        if with_engines_on_disk:
+            (trt / "llm_prefill.engine").write_bytes(b"engine")
+            (trt / "llm_decode.engine").write_bytes(b"engine")
+        monkeypatch.setattr(orchestrator, "ONNX_DIR", onnx)
+        monkeypatch.setattr(orchestrator, "TRT_DIR", trt)
+
+        class _Runner:
+            load_engines = orchestrator.LocateAnythingRunner.load_engines
+            vit_engine = None
+            proj_engine = None
+            prefill_engine = None
+            decode_engine = None
+            eng_img_w = None
+            eng_img_h = None
+        r = _Runner()
+        r.model = type("M", (), {"_locany_lm_head_was_rescued": rescued})()
+        r.processor = None
+        if rebuilt:
+            r._llm_engines_rebuilt_this_session = True
+        return r
+
+    def test_raises_when_rescued_and_not_rebuilt(self, tmp_path, monkeypatch):
+        r = self._make_runner_like(tmp_path, monkeypatch, rescued=True, rebuilt=False,
+                                     with_engines_on_disk=True)
+        with pytest.raises(RuntimeError, match="LLM engines were NOT rebuilt"):
+            r.load_engines()
+
+    def test_does_not_raise_when_rescued_and_rebuilt(self, tmp_path, monkeypatch):
+        """Regression: this was the bug that broke the user's Colab run. After
+        wipe + export + build, load_engines wrongly fired the stale-guard
+        because the freshly-built engines were treated as 'stale'."""
+        r = self._make_runner_like(tmp_path, monkeypatch, rescued=True, rebuilt=True,
+                                     with_engines_on_disk=True)
+        r.load_engines()  # must not raise
+
+    def test_does_not_raise_when_not_rescued(self, tmp_path, monkeypatch):
+        r = self._make_runner_like(tmp_path, monkeypatch, rescued=False, rebuilt=False,
+                                     with_engines_on_disk=True)
+        r.load_engines()  # not rescued -> no guard
+
+    def test_does_not_raise_when_no_engines_on_disk(self, tmp_path, monkeypatch):
+        r = self._make_runner_like(tmp_path, monkeypatch, rescued=True, rebuilt=False,
+                                     with_engines_on_disk=False)
+        r.load_engines()  # nothing to guard against
+
+
 class TestWipeStaleArtifacts:
     """LocateAnythingRunner._wipe_stale_artifacts must clear any files under
     ONNX_DIR + TRT_DIR when called — used after lm_head rescue invalidates
