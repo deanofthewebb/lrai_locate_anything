@@ -103,8 +103,26 @@ class _TRTGenerator:
         self.r = runner
 
     # ---- atomic ops over engines ----
+    # BF16 binding helpers: when an engine binding is bf16, pass a torch
+    # bf16 tensor or a uint16 buffer (NEVER np.float16 — that would
+    # silently reinterpret 1-5-10 fp16 bytes as 1-8-7 bf16 bytes and
+    # produce garbage). engine.py's _coerce_input enforces this.
+    @staticmethod
+    def _np16_to_bf16_torch(arr_np):
+        """View a np.float16 buffer as torch.bfloat16 byte-equivalent? No —
+        the bit layouts differ. We must go through a real precision cast
+        via float32. Use this for the legacy fp16 → bf16 boundary."""
+        return torch.from_numpy(arr_np.astype(np.float32)).to(torch.bfloat16)
+
+    @staticmethod
+    def _bf16_uint16_to_torch(arr_u16):
+        """Reinterpret a uint16 buffer as torch.bfloat16 (zero-copy bytes)."""
+        return torch.from_numpy(arr_u16).view(torch.bfloat16)
+
     def _vision(self, px: np.ndarray) -> np.ndarray:
         # The vision engine is fixed-resolution; px MUST be (L_pre_fixed, 3, 14, 14).
+        # Currently vit_engine I/O is fp16 (we left vision/projector at fp16 to
+        # keep build time down). If the binding is BF16 we accept uint16 storage.
         pre = self.r.vit_engine({"pixel_values": px})["vit_feats"]  # (L_pre_fixed, 1152)
         gh = np.array([[self.r.grid_h, self.r.grid_w]], dtype=np.int32)
         return python_patch_merger(pre, gh, kh=2, kw=2).astype(np.float16)
@@ -113,9 +131,17 @@ class _TRTGenerator:
         return self.r.proj_engine({"vit_feats_4x": x})["proj_feats"]
 
     def _prefill_trt(self, ids, vf, pos, att):
+        # If the prefill engine's visual_features binding is BF16, pass a
+        # torch.bfloat16 tensor (engine.py views it as uint16 zero-copy).
+        # vf comes from _project (fp16 numpy from the fp16 projector engine).
+        # Bridge via real cast through fp32.
+        if self.r.prefill_engine.is_bf16.get("visual_features", False):
+            vf_in = self._np16_to_bf16_torch(vf)
+        else:
+            vf_in = vf.astype(np.float16)
         o = self.r.prefill_engine({
             "input_ids":       ids.astype(np.int64),
-            "visual_features": vf.astype(np.float16),
+            "visual_features": vf_in,
             "position_ids":    pos.astype(np.int64),
             "attention_mask":  att.astype(np.int64),
         })
@@ -137,6 +163,10 @@ class _TRTGenerator:
         Picking the wrong engine produces correct STRUCTURE tokens but corrupt
         content because the attention mask topology baked into the engine
         doesn't match the runtime input semantics.
+
+        past_k_*/past_v_* may be uint16 (BF16 storage) or fp16 numpy depending
+        on the engine binding. We accept both forms verbatim — engine.py's
+        _coerce_input enforces type safety.
         """
         if branch == "mtp":
             engine = self.r.decode_engine
@@ -156,6 +186,8 @@ class _TRTGenerator:
             "position_ids":   pos.astype(np.int64),
             "attention_mask": att.astype(np.int64),
         }
+        # past tensors already carry the right dtype from the previous engine
+        # call (uint16 for BF16 bindings, fp16 numpy otherwise). Pass through.
         for i in range(self.r.n_layers):
             feed[f"past_k_{i}"] = past[2 * i]
             feed[f"past_v_{i}"] = past[2 * i + 1]
@@ -166,10 +198,43 @@ class _TRTGenerator:
             nxt.append(o[f"present_v_{i}"])
         return o["logits"], nxt
 
+    @staticmethod
+    def _kv_np_to_torch(arr_np):
+        """Past KV may come from a TRT engine as uint16 (BF16 storage) OR
+        fp16 numpy. Reconstruct a torch tensor on the model's device + dtype.
+        """
+        if arr_np.dtype == np.uint16:
+            # BF16 byte storage → torch.bfloat16 (zero-copy view)
+            return torch.from_numpy(arr_np).view(torch.bfloat16).cuda().to(REF_DTYPE)
+        # fp16 numpy: real precision cast through float32 to land at REF_DTYPE
+        return torch.from_numpy(arr_np.astype(np.float32)).cuda().to(REF_DTYPE)
+
+    @staticmethod
+    def _kv_torch_to_engine(t, want_uint16: bool):
+        """Convert a PT kv tensor to the engine's I/O format. want_uint16=True
+        means the next engine expects BF16 storage as uint16."""
+        if want_uint16:
+            return t.contiguous().view(torch.uint16).cpu().numpy()
+        return t.float().cpu().numpy().astype(np.float16)
+
+    @staticmethod
+    def _logits_to_torch_float(arr_np):
+        """Convert engine-output logits to torch float32 ready for sample_tokens.
+        Handles both BF16 (uint16 storage) and FP16 numpy buffers."""
+        if arr_np.dtype == np.uint16:
+            # BF16 byte storage → torch.bfloat16 view → float32 cast
+            return torch.from_numpy(arr_np).view(torch.bfloat16).float()
+        return torch.from_numpy(arr_np.astype(np.float32))
+
     def _prefill_pt(self, ids, vf, pos, att):
         with torch.inference_mode():
             i = torch.from_numpy(ids).long().cuda()
-            v = torch.from_numpy(vf).cuda().to(REF_DTYPE)
+            # vf can be fp16 numpy (from fp16 projector) — cast through fp32
+            # to land at the model's bf16 cleanly.
+            if isinstance(vf, np.ndarray) and vf.dtype == np.uint16:
+                v = torch.from_numpy(vf).view(torch.bfloat16).cuda().to(REF_DTYPE)
+            else:
+                v = torch.from_numpy(np.asarray(vf, dtype=np.float32)).cuda().to(REF_DTYPE)
             p = torch.from_numpy(pos).long().cuda()
             m = torch.from_numpy(att).long().cuda()
             o = self.r.model.language_model.model(
@@ -179,12 +244,13 @@ class _TRTGenerator:
                 use_cache=True, return_dict=True,
             )
             logits = self.r.model.language_model.lm_head(o.last_hidden_state).float().cpu().numpy().astype(np.float16)
+            # Match the engine binding format the NEXT call will use. If TRT
+            # decode engines are bf16-bound, store kv as uint16; else fp16.
+            want_uint16 = bool(self.r.decode_engine and self.r.decode_engine.is_bf16.get("past_k_0", False))
             past = []
             for (k, vv) in o.past_key_values:
-                # .float() before .numpy(): bfloat16 has no numpy dtype, so
-                # passing it directly raises TypeError. Round-trip via fp32.
-                past.append(k.float().cpu().numpy().astype(np.float16))
-                past.append(vv.float().cpu().numpy().astype(np.float16))
+                past.append(self._kv_torch_to_engine(k, want_uint16))
+                past.append(self._kv_torch_to_engine(vv, want_uint16))
         return logits, past
 
     def _decode_pt(self, ids, pos, att, past):
@@ -193,8 +259,8 @@ class _TRTGenerator:
             p = torch.from_numpy(pos).long().cuda()
             m = torch.from_numpy(att).long().cuda()
             pkv = tuple(
-                (torch.from_numpy(past[2 * j]).cuda().to(REF_DTYPE),
-                 torch.from_numpy(past[2 * j + 1]).cuda().to(REF_DTYPE))
+                (self._kv_np_to_torch(past[2 * j]),
+                 self._kv_np_to_torch(past[2 * j + 1]))
                 for j in range(self.r.n_layers)
             )
             o = self.r.model.language_model.model(
@@ -202,10 +268,11 @@ class _TRTGenerator:
                 past_key_values=pkv, use_cache=True, return_dict=True,
             )
             logits = self.r.model.language_model.lm_head(o.last_hidden_state).float().cpu().numpy().astype(np.float16)
+            want_uint16 = bool(self.r.decode_engine and self.r.decode_engine.is_bf16.get("past_k_0", False))
             nxt = []
             for (k, vv) in o.past_key_values:
-                nxt.append(k.float().cpu().numpy().astype(np.float16))
-                nxt.append(vv.float().cpu().numpy().astype(np.float16))
+                nxt.append(self._kv_torch_to_engine(k, want_uint16))
+                nxt.append(self._kv_torch_to_engine(vv, want_uint16))
         return logits, nxt
 
     def _prefill(self, *a):
@@ -259,7 +326,7 @@ class _TRTGenerator:
                 # MTP forward: input ends in mask_ids[-1] = text_mask_token_id,
                 # so we MUST use the mtp-baked engine (block-mask attention).
                 logits_o, nxt = self._decode_mtp(mtp_ids, pos, att, past)
-                lt = torch.from_numpy(logits_o.astype(np.float32))
+                lt = self._logits_to_torch_float(logits_o)
                 gt = torch.from_numpy(generated).long()
                 probs, conf, x0, box_avg = sample_tokens(
                     lt, gt, self.r.TID,
@@ -331,7 +398,7 @@ class _TRTGenerator:
                 att = np.ones((1, P + 1), dtype=np.int64)
                 # AR fallback: single real (non-mask) token → AR-branch engine.
                 logits_o, nxt = self._decode_ar(last_id, pos, att, past)
-                lt = torch.from_numpy(logits_o.astype(np.float32))
+                lt = self._logits_to_torch_float(logits_o)
                 gt = torch.from_numpy(generated).long()
                 probs, conf, x0, *_ = sample_tokens_ar(
                     lt, gt, self.r.TID,
@@ -478,7 +545,7 @@ class LocateAnythingRunner:
     # graph topology, etc.). Combined with the model-state hash to form the
     # full fingerprint, so engines built with old flags get wiped on next
     # auto_export even when the model weights haven't changed.
-    _ENGINE_BUILD_VERSION = "v2:bf16-llm+dual-decode"
+    _ENGINE_BUILD_VERSION = "v3:bf16-llm-io+dual-decode"
 
     def _model_fingerprint(self) -> str:
         """Stable hash of the in-memory model state PLUS the engine build version.
@@ -610,14 +677,16 @@ class LocateAnythingRunner:
         vit_h = self.config.vision_config.hidden_size
         vit_feat_dim = vit_h * 4
 
-        # Cast the model to fp16 for the duration of ONNX export. ONNX dummy
-        # inputs in each exporter default to fp16; if the model is bf16 the trace
-        # raises "Input type (Half) and bias type (BFloat16) should be the same".
+        # Export with the model's NATIVE bf16 dtype. The export wrappers now
+        # default their dummy tensors to bf16; the resulting ONNX has bf16
+        # weight + I/O dtypes, and build_engine sets BuilderFlag.BF16. PT
+        # inference runs at the same bf16, so TRT and PT use identical compute
+        # precision — closing the prefill cos_sim gap (was 0.945 with TRT fp16
+        # vs PT bf16; expected ~1.0 with both bf16).
         orig_dtype = next(self.model.parameters()).dtype
-        cast_for_export = (orig_dtype != torch.float16)
-        if cast_for_export:
-            print(f"[runner] casting model {orig_dtype} -> torch.float16 for ONNX export (TRT engines are fp16)")
-            self.model.to(dtype=torch.float16)
+        # No dtype cast required. The fingerprint includes _ENGINE_BUILD_VERSION
+        # so callers with cached fp16 engines auto-wipe and rebuild bf16.
+        cast_for_export = False
         try:
             export_vision(self.model.vision_model, self.grid_h, self.grid_w, ONNX_DIR / "vision.onnx")
             export_projector(self.model.mlp1, vit_feat_dim, ONNX_DIR / "projector.onnx")

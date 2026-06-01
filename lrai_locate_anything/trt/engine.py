@@ -4,14 +4,30 @@ Uses cuda-python (cuda.bindings.runtime) for memory + streams. set_input_shape's
 return value IS checked — TRT 10 returns False (not an exception) when a shape
 falls outside the engine's optimisation profile, which would otherwise lead to
 silent stale-state inference.
+
+BF16 binding support:
+  numpy has no native bfloat16 dtype, so for BF16-typed TRT bindings we use
+  uint16 as the byte-storage proxy. uint16 has the same 2-byte width as bf16;
+  TRT reads raw bytes and interprets according to its declared dtype. Callers
+  pass bf16 inputs either as np.uint16 buffers (already in bf16 byte layout)
+  or as torch.bfloat16 tensors (we view-as-uint16 internally). Outputs come
+  back as np.uint16; the caller views as torch.bfloat16 via
+      torch.from_numpy(arr).view(torch.bfloat16)
+  to recover the semantic dtype.
 """
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Union
 
 import numpy as np
 import tensorrt as trt
 from cuda.bindings import runtime as cudart
+
+try:  # torch is optional for the engine itself, but bf16 callers need it
+    import torch
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
 
 
 def get_trt_logger(verbosity: str = "INFO") -> trt.Logger:
@@ -29,6 +45,14 @@ def _check(ret):
     return ret[1] if len(ret) > 1 else None
 
 
+def _trt_dtype_to_np(td) -> "np.dtype":
+    """Map a TRT data type to the numpy dtype we use for I/O storage. BF16
+    has no native numpy dtype so we map it to uint16 (same byte layout)."""
+    if td == trt.DataType.BF16:
+        return np.dtype(np.uint16)
+    return np.dtype(trt.nptype(td))
+
+
 class TRTEngine:
     """Load + run a TensorRT engine with named feed/output dicts."""
 
@@ -38,14 +62,17 @@ class TRTEngine:
         self.ctx = self.engine.create_execution_context()
         self.io = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
         self.is_in = {n: self.engine.get_tensor_mode(n) == trt.TensorIOMode.INPUT for n in self.io}
-        self.dtype = {n: trt.nptype(self.engine.get_tensor_dtype(n)) for n in self.io}
+        # Per-binding semantic TRT dtype + numpy storage dtype. BF16 storage is uint16.
+        self.trt_dtype = {n: self.engine.get_tensor_dtype(n) for n in self.io}
+        self.dtype = {n: _trt_dtype_to_np(self.trt_dtype[n]) for n in self.io}
+        self.is_bf16 = {n: (self.trt_dtype[n] == trt.DataType.BF16) for n in self.io}
 
-    def __call__(self, feed: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def __call__(self, feed: Dict[str, Union[np.ndarray, "torch.Tensor"]]) -> Dict[str, np.ndarray]:
         bufs = []
         outs: Dict[str, tuple] = {}
         # Bind inputs
-        for n, arr in feed.items():
-            arr = np.ascontiguousarray(arr.astype(self.dtype[n]))
+        for n, val in feed.items():
+            arr = self._coerce_input(n, val)
             dptr = _check(cudart.cudaMalloc(arr.nbytes))
             _check(cudart.cudaMemcpy(dptr, arr.ctypes.data, arr.nbytes,
                                      cudart.cudaMemcpyKind.cudaMemcpyHostToDevice))
@@ -63,7 +90,7 @@ class TRTEngine:
             if self.is_in[n]:
                 continue
             shape = tuple(self.ctx.get_tensor_shape(n))
-            arr = np.empty(shape, dtype=self.dtype[n])
+            arr = np.empty(shape, dtype=self.dtype[n])  # uint16 for BF16 bindings
             dptr = _check(cudart.cudaMalloc(arr.nbytes))
             self.ctx.set_tensor_address(n, int(dptr))
             outs[n] = (dptr, arr)
@@ -82,3 +109,39 @@ class TRTEngine:
             cudart.cudaFree(d)
         cudart.cudaStreamDestroy(stream)
         return result
+
+    def _coerce_input(self, name: str, val) -> np.ndarray:
+        """Convert a caller-supplied input into the right numpy byte layout for
+        this binding. For BF16 bindings:
+          - torch.bfloat16 tensor -> view as uint16 (zero-copy bytes)
+          - numpy uint16 buffer   -> accept as-is (caller already encoded)
+          - any other input       -> error (no implicit conversion; would
+                                      silently corrupt by reinterpreting fp16
+                                      bytes as bf16 bytes etc.)
+        For non-BF16 bindings: cast via numpy as before.
+        """
+        if self.is_bf16[name]:
+            if _HAS_TORCH and torch.is_tensor(val):
+                if val.dtype != torch.bfloat16:
+                    raise TypeError(
+                        f"BF16 binding {name!r} requires torch.bfloat16 tensor "
+                        f"or np.uint16 buffer; got torch.{val.dtype}"
+                    )
+                # .view(torch.uint16) is a zero-copy bit-reinterpretation. We
+                # then materialise on CPU for the cudaMemcpy.
+                v = val.detach().contiguous().view(torch.uint16).cpu().numpy()
+                return np.ascontiguousarray(v)
+            if isinstance(val, np.ndarray):
+                if val.dtype != np.uint16:
+                    raise TypeError(
+                        f"BF16 binding {name!r}: pass torch.bfloat16 tensor "
+                        f"or np.uint16 buffer; got numpy {val.dtype}"
+                    )
+                return np.ascontiguousarray(val)
+            raise TypeError(
+                f"BF16 binding {name!r}: unsupported input type {type(val).__name__}"
+            )
+        # Non-BF16: regular numpy cast
+        if _HAS_TORCH and torch.is_tensor(val):
+            val = val.detach().cpu().numpy()
+        return np.ascontiguousarray(val.astype(self.dtype[name]))

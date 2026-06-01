@@ -18,7 +18,7 @@ def export_projector(
     mlp1: torch.nn.Module,
     vit_feat_dim: int,
     onnx_path: Path,
-    dtype: torch.dtype = torch.float16,
+    dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
 ) -> Path:
     """Export the projector to ONNX. vit_feat_dim is the post-merger input dim
