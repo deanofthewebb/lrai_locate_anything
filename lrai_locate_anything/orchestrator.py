@@ -397,28 +397,14 @@ class LocateAnythingRunner:
               f"decode={'yes' if self.decode_engine else 'no (PT fallback)'}")
 
     # ----- inference -----
-    def detect(self, image, prompt: str = "Detect all objects. Return bounding boxes.",
-               max_new_tokens: int = 128, generation_mode: str = "hybrid",
-               diagnostic: bool = True) -> Tuple[List, str]:
-        """Single-image inference. Returns (boxes, raw_decoded_text).
-
-        boxes are (x1, y1, x2, y2) in original image pixel space.
-
-        diagnostic=True writes the last raw decoded text to WORK/'last_inference.txt'
-        AND prints a one-line summary when 0 boxes are detected (so notebook
-        staleness can't hide the actual model output).
-        """
-        if isinstance(image, (str, Path)):
-            image = Image.open(image).convert("RGB")
-        orig_w, orig_h = image.size
-
-        # Force-resize to the baked engine resolution before the processor sees it.
+    def _detect_via_trt(self, image: Image.Image, prompt: str,
+                         max_new_tokens: int, generation_mode: str) -> Tuple[List, str]:
+        """TRT path: vision→projector engines, then LLM via prefill+decode engines (or
+        PyTorch LM fallback when LLM engines absent)."""
         if self.eng_img_w is None:
             raise RuntimeError("Runner not initialised; call .export_engines() + .build_engines() + .load_engines() first")
         img_eng = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
-
         enc = self._processor_call(img_eng, prompt)
-        # Sanity-check the processor produced the right grid.
         gh = enc["image_grid_hws"]
         if (int(gh[0, 0]), int(gh[0, 1])) != (self.grid_h, self.grid_w):
             raise RuntimeError(
@@ -427,39 +413,110 @@ class LocateAnythingRunner:
                 f"merge_kernel_size*patch_size and that processor.image_processor.in_token_limit "
                 f">= {self.grid_h * self.grid_w} (see lock_processor_resolution())."
             )
-
         px_np = enc["pixel_values"].detach().cpu().numpy().astype(np.float16)
         ids_np = enc["input_ids"].detach().cpu().numpy().astype(np.int64)
-
         _, toks = self._gen.generate(
             px_np, ids_np,
             max_new_tokens=max_new_tokens, generation_mode=generation_mode,
             temperature=0.0, top_p=1.0, repetition_penalty=1.0,
         )
         text = self.tokenizer.decode(toks, skip_special_tokens=False)
-        boxes_eng = parse_boxes(text, self.eng_img_w, self.eng_img_h)
-        # Scale back to original image dimensions.
+        return parse_boxes(text, self.eng_img_w, self.eng_img_h), text
+
+    def _detect_via_pt(self, image: Image.Image, prompt: str,
+                        max_new_tokens: int, generation_mode: str = "hybrid") -> Tuple[List, str]:
+        """PyTorch canonical generate(). Used as auto-fallback when TRT returns 0 boxes
+        (only available if `model` is still resident on GPU)."""
+        if self.model is None:
+            return [], ""
+        img_eng = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
+        enc = self._processor_call(img_eng, prompt)
+        with torch.inference_mode():
+            out = self.model.generate(
+                pixel_values=enc["pixel_values"], input_ids=enc["input_ids"],
+                attention_mask=enc["attention_mask"], image_grid_hws=enc["image_grid_hws"],
+                tokenizer=self.tokenizer, max_new_tokens=max_new_tokens, use_cache=True,
+                generation_mode=generation_mode, do_sample=False, verbose=False,
+            )
+        ot = out[0] if isinstance(out, tuple) else out
+        if torch.is_tensor(ot):
+            text = self.tokenizer.decode(ot[0, enc["input_ids"].shape[1]:], skip_special_tokens=False)
+        else:
+            text = str(ot)
+        return parse_boxes(text, self.eng_img_w, self.eng_img_h), text
+
+    def detect(self, image, prompt: str = "Detect all objects. Return bounding boxes.",
+               max_new_tokens: int = 128, generation_mode: str = "hybrid",
+               diagnostic: bool = True, auto_fallback_to_pt: bool = True,
+               verbose: bool = False) -> Tuple[List, str]:
+        """Single-image inference. Returns (boxes, raw_decoded_text).
+
+        boxes are (x1, y1, x2, y2) in original image pixel space.
+
+        Parameters
+        ----------
+        diagnostic         : write WORK/'last_inference.txt' (raw text + metadata).
+                             On 0 boxes also prints a one-line preview to stdout so
+                             notebook staleness can't hide the diagnostic.
+        auto_fallback_to_pt: when TRT returns 0 boxes AND `self.model` is resident,
+                             automatically retry via canonical model.generate(). If
+                             PT returns boxes, use that result. This converts the
+                             two-step manual diagnose-and-fall-back I was previously
+                             pushing into notebook cells into a single transparent call.
+        verbose            : always print raw text + token count, not just on failure.
+        """
+        if isinstance(image, (str, Path)):
+            image = Image.open(image).convert("RGB")
+        orig_w, orig_h = image.size
+
+        # 1) TRT path
+        boxes_eng, text = self._detect_via_trt(image, prompt, max_new_tokens, generation_mode)
+        path_used = "trt"
+
+        # 2) Auto-fallback to PyTorch if TRT produced nothing
+        if len(boxes_eng) == 0 and auto_fallback_to_pt and self.model is not None:
+            if verbose or diagnostic:
+                print(f"[detect] TRT returned 0 boxes; auto-falling back to PyTorch canonical generate()...")
+            pt_boxes_eng, pt_text = self._detect_via_pt(image, prompt, max_new_tokens, generation_mode)
+            if len(pt_boxes_eng) > 0:
+                if verbose or diagnostic:
+                    print(f"[detect] PyTorch returned {len(pt_boxes_eng)} boxes. Using PT result.")
+                boxes_eng, text = pt_boxes_eng, pt_text
+                path_used = "pt_fallback"
+            else:
+                if verbose or diagnostic:
+                    print(f"[detect] PyTorch also returned 0 boxes. Issue is upstream of TRT (prompt/template/model).")
+                # Store PT text too so the dump has both
+                text = f"### TRT output ###\n{text}\n### PyTorch output ###\n{pt_text}\n"
+
+        # 3) Scale boxes back to original image
         sx, sy = orig_w / self.eng_img_w, orig_h / self.eng_img_h
         boxes = [(x1 * sx, y1 * sy, x2 * sx, y2 * sy) for (x1, y1, x2, y2) in boxes_eng]
 
-        if diagnostic:
+        # 4) Diagnostics
+        if diagnostic or verbose:
             try:
                 (WORK / "last_inference.txt").write_text(
                     f"# prompt: {prompt}\n"
-                    f"# tokens: {len(toks)}  boxes_parsed: {len(boxes)}\n"
+                    f"# path: {path_used}  boxes: {len(boxes)}\n"
                     f"# generation_mode: {generation_mode}\n"
                     f"# eng_img: {self.eng_img_w}x{self.eng_img_h}  grid: ({self.grid_h},{self.grid_w})\n"
                     f"---\n{text}\n"
                 )
             except Exception:
                 pass
-            if len(boxes) == 0:
-                # Surface the raw text so notebook staleness can't hide the diagnostic.
-                preview = text[:400].replace("\n", "  ")
-                print(f"[detect] 0 boxes detected.  Raw output ({len(text)} chars, {len(toks)} tokens):")
-                print(f"  {preview}{'...' if len(text)>400 else ''}")
-                if "<box>" not in text:
-                    print(f"[detect] No <box> tags in output. Full text dumped to {WORK / 'last_inference.txt'}")
-                else:
-                    print(f"[detect] WARN: <box> present in raw but parse_boxes returned []. Check the regex.")
+
+        if verbose:
+            preview = text[:600].replace("\n", "  ")
+            print(f"[detect] path={path_used} boxes={len(boxes)} chars={len(text)}")
+            print(f"  raw: {preview}{'...' if len(text)>600 else ''}")
+        elif diagnostic and len(boxes) == 0:
+            preview = text[:400].replace("\n", "  ")
+            print(f"[detect] 0 boxes detected (path={path_used}).  Raw output ({len(text)} chars):")
+            print(f"  {preview}{'...' if len(text)>400 else ''}")
+            if "<box>" not in text:
+                print(f"[detect] No <box> tags in output. Full dump at {WORK / 'last_inference.txt'}")
+            else:
+                print(f"[detect] WARN: <box> present in raw but parse_boxes returned []. Check the regex.")
+
         return boxes, text
