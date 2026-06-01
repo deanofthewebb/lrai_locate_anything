@@ -156,8 +156,10 @@ class _TRTGenerator:
             logits = self.r.model.language_model.lm_head(o.last_hidden_state).float().cpu().numpy().astype(np.float16)
             past = []
             for (k, vv) in o.past_key_values:
-                past.append(k.cpu().numpy().astype(np.float16))
-                past.append(vv.cpu().numpy().astype(np.float16))
+                # .float() before .numpy(): bfloat16 has no numpy dtype, so
+                # passing it directly raises TypeError. Round-trip via fp32.
+                past.append(k.float().cpu().numpy().astype(np.float16))
+                past.append(vv.float().cpu().numpy().astype(np.float16))
         return logits, past
 
     def _decode_pt(self, ids, pos, att, past):
@@ -177,8 +179,8 @@ class _TRTGenerator:
             logits = self.r.model.language_model.lm_head(o.last_hidden_state).float().cpu().numpy().astype(np.float16)
             nxt = []
             for (k, vv) in o.past_key_values:
-                nxt.append(k.cpu().numpy().astype(np.float16))
-                nxt.append(vv.cpu().numpy().astype(np.float16))
+                nxt.append(k.float().cpu().numpy().astype(np.float16))
+                nxt.append(vv.float().cpu().numpy().astype(np.float16))
         return logits, nxt
 
     def _prefill(self, *a):
@@ -412,6 +414,13 @@ class LocateAnythingRunner:
 
         The vision engine bakes pos_emb at the resolution implied by `sample_image`.
         Pass a sample image representative of your downstream workload (resolution-wise).
+
+        Dtype contract:
+          - Model is loaded as REF_DTYPE (bfloat16, canonical for PT inference).
+          - TRT engines are fp16-built (numpy lacks bf16 for engine I/O).
+          - We TEMPORARILY cast the model to fp16 for the duration of the ONNX
+            exports, then restore the original dtype. PT inference (model.generate)
+            runs at REF_DTYPE; only the trace-graph capture is fp16.
         """
         from .export import (
             export_vision, export_projector,
@@ -437,25 +446,38 @@ class LocateAnythingRunner:
         vit_h = self.config.vision_config.hidden_size
         vit_feat_dim = vit_h * 4
 
-        export_vision(self.model.vision_model, self.grid_h, self.grid_w, ONNX_DIR / "vision.onnx")
-        export_projector(self.model.mlp1, vit_feat_dim, ONNX_DIR / "projector.onnx")
+        # Cast the model to fp16 for the duration of ONNX export. ONNX dummy
+        # inputs in each exporter default to fp16; if the model is bf16 the trace
+        # raises "Input type (Half) and bias type (BFloat16) should be the same".
+        orig_dtype = next(self.model.parameters()).dtype
+        cast_for_export = (orig_dtype != torch.float16)
+        if cast_for_export:
+            print(f"[runner] casting model {orig_dtype} -> torch.float16 for ONNX export (TRT engines are fp16)")
+            self.model.to(dtype=torch.float16)
+        try:
+            export_vision(self.model.vision_model, self.grid_h, self.grid_w, ONNX_DIR / "vision.onnx")
+            export_projector(self.model.mlp1, vit_feat_dim, ONNX_DIR / "projector.onnx")
 
-        lm_main = self.model.language_model.model
-        lm_head = self.model.language_model.lm_head
-        export_llm_prefill(
-            lm_main, lm_head,
-            image_token_index=int(self.config.image_token_index),
-            n_layers=self.n_layers, hidden_size=self.hidden_size,
-            n_img_tokens=n_img_tokens,
-            onnx_path=ONNX_DIR / "llm_prefill.onnx",
-        )
-        export_llm_decode(
-            lm_main, lm_head,
-            n_layers=self.n_layers, hidden_size=self.hidden_size,
-            n_kv_heads=self.n_kv_heads, head_dim=self.head_dim,
-            text_mask_token_id=int(self.config.text_config.text_mask_token_id),
-            onnx_path=ONNX_DIR / "llm_decode.onnx",
-        )
+            lm_main = self.model.language_model.model
+            lm_head = self.model.language_model.lm_head
+            export_llm_prefill(
+                lm_main, lm_head,
+                image_token_index=int(self.config.image_token_index),
+                n_layers=self.n_layers, hidden_size=self.hidden_size,
+                n_img_tokens=n_img_tokens,
+                onnx_path=ONNX_DIR / "llm_prefill.onnx",
+            )
+            export_llm_decode(
+                lm_main, lm_head,
+                n_layers=self.n_layers, hidden_size=self.hidden_size,
+                n_kv_heads=self.n_kv_heads, head_dim=self.head_dim,
+                text_mask_token_id=int(self.config.text_config.text_mask_token_id),
+                onnx_path=ONNX_DIR / "llm_decode.onnx",
+            )
+        finally:
+            if cast_for_export:
+                print(f"[runner] restoring model torch.float16 -> {orig_dtype} (PT inference dtype)")
+                self.model.to(dtype=orig_dtype)
 
     def build_engines(self, llm: bool = True):
         """Build vision + projector engines, and optionally the LLM prefill/decode
@@ -550,7 +572,9 @@ class LocateAnythingRunner:
                 f"merge_kernel_size*patch_size and that processor.image_processor.in_token_limit "
                 f">= {self.grid_h * self.grid_w} (see lock_processor_resolution())."
             )
-        px_np = enc["pixel_values"].detach().cpu().numpy().astype(np.float16)
+        # .float() before .numpy() to handle bfloat16 (no numpy dtype). Cast to
+        # np.float16 at the boundary so it matches the fp16 TRT engine input.
+        px_np = enc["pixel_values"].detach().float().cpu().numpy().astype(np.float16)
         ids_np = enc["input_ids"].detach().cpu().numpy().astype(np.int64)
         _, toks = self._gen.generate(
             px_np, ids_np,
