@@ -398,10 +398,15 @@ class LocateAnythingRunner:
 
     # ----- inference -----
     def detect(self, image, prompt: str = "Detect all objects. Return bounding boxes.",
-               max_new_tokens: int = 128, generation_mode: str = "hybrid") -> Tuple[List, str]:
+               max_new_tokens: int = 128, generation_mode: str = "hybrid",
+               diagnostic: bool = True) -> Tuple[List, str]:
         """Single-image inference. Returns (boxes, raw_decoded_text).
 
         boxes are (x1, y1, x2, y2) in original image pixel space.
+
+        diagnostic=True writes the last raw decoded text to WORK/'last_inference.txt'
+        AND prints a one-line summary when 0 boxes are detected (so notebook
+        staleness can't hide the actual model output).
         """
         if isinstance(image, (str, Path)):
             image = Image.open(image).convert("RGB")
@@ -436,4 +441,25 @@ class LocateAnythingRunner:
         # Scale back to original image dimensions.
         sx, sy = orig_w / self.eng_img_w, orig_h / self.eng_img_h
         boxes = [(x1 * sx, y1 * sy, x2 * sx, y2 * sy) for (x1, y1, x2, y2) in boxes_eng]
+
+        if diagnostic:
+            try:
+                (WORK / "last_inference.txt").write_text(
+                    f"# prompt: {prompt}\n"
+                    f"# tokens: {len(toks)}  boxes_parsed: {len(boxes)}\n"
+                    f"# generation_mode: {generation_mode}\n"
+                    f"# eng_img: {self.eng_img_w}x{self.eng_img_h}  grid: ({self.grid_h},{self.grid_w})\n"
+                    f"---\n{text}\n"
+                )
+            except Exception:
+                pass
+            if len(boxes) == 0:
+                # Surface the raw text so notebook staleness can't hide the diagnostic.
+                preview = text[:400].replace("\n", "  ")
+                print(f"[detect] 0 boxes detected.  Raw output ({len(text)} chars, {len(toks)} tokens):")
+                print(f"  {preview}{'...' if len(text)>400 else ''}")
+                if "<box>" not in text:
+                    print(f"[detect] No <box> tags in output. Full text dumped to {WORK / 'last_inference.txt'}")
+                else:
+                    print(f"[detect] WARN: <box> present in raw but parse_boxes returned []. Check the regex.")
         return boxes, text
