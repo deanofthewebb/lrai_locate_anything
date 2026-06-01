@@ -167,33 +167,30 @@ def export_llm_prefill(
     return onnx_path
 
 
-def export_llm_decode(
+def _export_decode_with_dummy_ids(
     lm_main: torch.nn.Module,
     lm_head: torch.nn.Module,
     n_layers: int,
-    hidden_size: int,
     n_kv_heads: int,
     head_dim: int,
-    text_mask_token_id: int,
+    ids_dec: torch.Tensor,
     onnx_path: Path,
-    dtype: torch.dtype = torch.float16,
-    device: str = "cuda",
-    k_trace: int = 6,
-    p_trace: int = 32,
+    dtype: torch.dtype,
+    device: str,
+    k_trace: int,
+    p_trace: int,
 ) -> Path:
-    """Export the LLM decode graph (dynamic K ∈ {1, 6}, dynamic past_seq).
-
-    The dummy input_ids puts text_mask_token_id at the LAST position so the SDLM
-    block-mask branch is captured for K=6 (MTP). For K=1 at runtime the canonical
-    short-circuits on seq_length==1 regardless of last-token value.
+    """Common decode trace body — only the dummy input_ids tensor differs between
+    the MTP-branch and AR-branch variants. modeling_qwen2.py:1279's data-dependent
+    branch `seq_length==1 or input_ids[0][-1].item() != text_mask_token_id`
+    evaluates at trace time and is constant-folded with dynamo=False; the
+    caller controls the branch by what it puts at ids_dec[0, -1].
     """
     onnx_path = Path(onnx_path)
     if onnx_path.exists() and onnx_path.stat().st_size > 0:
         print(f"[export] cached: {onnx_path}")
         return onnx_path
 
-    ids_dec = torch.full((1, k_trace), int(text_mask_token_id), dtype=torch.long, device=device)
-    ids_dec[0, 0] = 0  # non-mask first position (last committed real token)
     pd_ = torch.arange(p_trace, p_trace + k_trace, dtype=torch.long, device=device)[None]
     md = torch.ones(1, p_trace + k_trace, dtype=torch.long, device=device)
     past_args = []
@@ -222,3 +219,70 @@ def export_llm_decode(
         do_constant_folding=False,
     )
     return onnx_path
+
+
+def export_llm_decode(
+    lm_main: torch.nn.Module,
+    lm_head: torch.nn.Module,
+    n_layers: int,
+    hidden_size: int,
+    n_kv_heads: int,
+    head_dim: int,
+    text_mask_token_id: int,
+    onnx_path: Path,
+    dtype: torch.dtype = torch.float16,
+    device: str = "cuda",
+    k_trace: int = 6,
+    p_trace: int = 32,
+) -> Path:
+    """Export the LLM decode graph for the MTP forward (block-mask branch).
+
+    Dummy input_ids[0, -1] = text_mask_token_id forces the
+    `seq_length == 1 or input_ids[0][-1] != mask` branch in
+    modeling_qwen2.py:1279 to evaluate FALSE at trace time, baking the SDLM
+    block-mask attention path into the engine. Use this engine for the MTP
+    forward only (orchestrator._TRTGenerator generate-loop, the K=BLOCK case
+    where input is `[last, mask, mask, mask, mask, mask]`).
+    """
+    ids_dec = torch.full((1, k_trace), int(text_mask_token_id), dtype=torch.long, device=device)
+    ids_dec[0, 0] = 0  # non-mask first position (last committed real token)
+    return _export_decode_with_dummy_ids(
+        lm_main, lm_head, n_layers, n_kv_heads, head_dim,
+        ids_dec, onnx_path, dtype, device, k_trace, p_trace,
+    )
+
+
+def export_llm_decode_ar(
+    lm_main: torch.nn.Module,
+    lm_head: torch.nn.Module,
+    n_layers: int,
+    hidden_size: int,
+    n_kv_heads: int,
+    head_dim: int,
+    onnx_path: Path,
+    dtype: torch.dtype = torch.float16,
+    device: str = "cuda",
+    k_trace: int = 6,
+    p_trace: int = 32,
+) -> Path:
+    """Export the LLM decode graph for the AR / KV-rebuild path.
+
+    Dummy input_ids contains NO text_mask_token_id, so modeling_qwen2.py:1279's
+    `input_ids[0][-1] != mask` evaluates TRUE at trace time, baking the AR
+    (non-block-mask) attention branch into the engine. Use this engine for
+    any decode call whose runtime input_ids[0, -1] is a real committed token:
+      - AR fallback when MTP can't decode a valid box pattern
+      - KV-rebuild after an MTP block commits real tokens (post-MTP truncation
+        of mask-position kv, then refill via this AR engine)
+
+    The two engines coexist; orchestrator routes by branch semantics. Engines
+    are byte-identical apart from the constant-folded attention-mask construction
+    inside the LM body.
+    """
+    # All zeros is a non-mask token id (the Qwen2 tokenizer reserves 0 for <unk>
+    # which is never text_mask_token_id). This forces the AR branch.
+    ids_dec = torch.zeros((1, k_trace), dtype=torch.long, device=device)
+    return _export_decode_with_dummy_ids(
+        lm_main, lm_head, n_layers, n_kv_heads, head_dim,
+        ids_dec, onnx_path, dtype, device, k_trace, p_trace,
+    )

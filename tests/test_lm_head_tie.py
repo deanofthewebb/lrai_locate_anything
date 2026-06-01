@@ -179,6 +179,11 @@ class TestLoadEnginesStaleGuard:
         if with_engines_on_disk:
             (trt / "llm_prefill.engine").write_bytes(b"engine")
             (trt / "llm_decode.engine").write_bytes(b"engine")
+            # The dual-engine pipeline added llm_decode_ar.engine. Tests that
+            # simulate the "engines on disk + rebuilt this session" path must
+            # also place the AR engine, otherwise load_engines's pre-dual-engine
+            # guard will raise.
+            (trt / "llm_decode_ar.engine").write_bytes(b"engine")
         monkeypatch.setattr(orchestrator, "ONNX_DIR", onnx)
         monkeypatch.setattr(orchestrator, "TRT_DIR", trt)
 
@@ -188,6 +193,7 @@ class TestLoadEnginesStaleGuard:
             proj_engine = None
             prefill_engine = None
             decode_engine = None
+            decode_engine_ar = None
             eng_img_w = None
             eng_img_h = None
         r = _Runner()

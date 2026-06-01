@@ -12,7 +12,7 @@ Two architectural invariants this module enforces:
 from __future__ import annotations
 import time
 from pathlib import Path
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, Optional
 
 import tensorrt as trt
 from .engine import _DEFAULT_LOGGER
@@ -101,19 +101,46 @@ def build_projector(onnx_path: Path, out_engine: Path, l_post_fixed: int,
     return build_engine(onnx_path, prof, out_engine, name="projector", **kw)
 
 
+def _decode_profile(n_layers: int, n_kv_heads: int, head_dim: int,
+                     p_min: int, p_opt: int, p_max: int) -> Dict[str, Tuple[tuple, tuple, tuple]]:
+    """Shared profile for both decode engines (MTP-branch and AR-branch).
+    Both engines have identical I/O shapes; only the constant-folded attention
+    branch inside the LM body differs."""
+    prof: Dict[str, Tuple[tuple, tuple, tuple]] = {
+        "input_ids":      ((1, 1), (1, 6),    (1, 6)),
+        "position_ids":   ((1, 1), (1, 6),    (1, 6)),
+        "attention_mask": ((1, 1), (1, p_opt + 6), (1, p_max + 6)),
+    }
+    for i in range(n_layers):
+        prof[f"past_k_{i}"] = ((1, n_kv_heads, p_min, head_dim),
+                                (1, n_kv_heads, p_opt, head_dim),
+                                (1, n_kv_heads, p_max, head_dim))
+        prof[f"past_v_{i}"] = ((1, n_kv_heads, p_min, head_dim),
+                                (1, n_kv_heads, p_opt, head_dim),
+                                (1, n_kv_heads, p_max, head_dim))
+    return prof
+
+
 def build_llm(prefill_onnx: Path, decode_onnx: Path,
               prefill_engine: Path, decode_engine: Path,
               hidden_size: int, n_layers: int, n_kv_heads: int, head_dim: int,
+              decode_ar_onnx: Optional[Path] = None, decode_ar_engine: Optional[Path] = None,
               s_min: int = 16, s_opt: int = 1024, s_max: int = 4096,
               p_min: int = 0, p_opt: int = 1024, p_max: int = 4096,
-              workspace_gb: int = 8, **kw) -> Tuple[Path, Path]:
-    """Build prefill + decode LLM engines. Profile keys here MUST match LLMPrefill /
-    LLMDecode's forward parameter names exported via input_names."""
+              workspace_gb: int = 8, **kw) -> Tuple[Path, Path, Optional[Path]]:
+    """Build prefill + (MTP-branch) decode + optional (AR-branch) decode engines.
+
+    The two decode engines have identical I/O profiles; they differ only in the
+    constant-folded SDLM block-mask branch inside the LM body. The MTP engine
+    runs the block-mask attention path (correct for input `[last, mask×5]`);
+    the AR engine runs the canonical AR attention path (correct for inputs with
+    no text_mask_token_id at the last position, i.e. AR steps and KV-rebuild).
+
+    Profile keys MUST match LLMPrefill / LLMDecode's forward parameter names.
+    """
     H = hidden_size
     pref_prof = {
         "input_ids":       ((1, s_min), (1, s_opt), (1, s_max)),
-        # visual_features is dynamic on dim 0; the engine accepts any image-token count
-        # up to the typical max L_post for a frame. We expose it as L_post in [1, s_max].
         "visual_features": ((1, H),     (1024, H),  (s_max, H)),
         "position_ids":    ((1, s_min), (1, s_opt), (1, s_max)),
         "attention_mask":  ((1, s_min), (1, s_opt), (1, s_max)),
@@ -121,18 +148,13 @@ def build_llm(prefill_onnx: Path, decode_onnx: Path,
     pre = build_engine(prefill_onnx, pref_prof, prefill_engine,
                        workspace_gb=workspace_gb, name="llm_prefill", **kw)
 
-    dec_prof = {
-        "input_ids":      ((1, 1), (1, 6),    (1, 6)),
-        "position_ids":   ((1, 1), (1, 6),    (1, 6)),
-        "attention_mask": ((1, 1), (1, p_opt + 6), (1, p_max + 6)),
-    }
-    for i in range(n_layers):
-        dec_prof[f"past_k_{i}"] = ((1, n_kv_heads, p_min, head_dim),
-                                    (1, n_kv_heads, p_opt, head_dim),
-                                    (1, n_kv_heads, p_max, head_dim))
-        dec_prof[f"past_v_{i}"] = ((1, n_kv_heads, p_min, head_dim),
-                                    (1, n_kv_heads, p_opt, head_dim),
-                                    (1, n_kv_heads, p_max, head_dim))
+    dec_prof = _decode_profile(n_layers, n_kv_heads, head_dim, p_min, p_opt, p_max)
     dec = build_engine(decode_onnx, dec_prof, decode_engine,
-                       workspace_gb=workspace_gb, name="llm_decode", **kw)
-    return pre, dec
+                       workspace_gb=workspace_gb, name="llm_decode_mtp", **kw)
+
+    dec_ar = None
+    if decode_ar_onnx is not None and decode_ar_engine is not None:
+        dec_ar = build_engine(decode_ar_onnx, dec_prof, decode_ar_engine,
+                              workspace_gb=workspace_gb, name="llm_decode_ar", **kw)
+
+    return pre, dec, dec_ar

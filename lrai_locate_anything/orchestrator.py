@@ -125,7 +125,32 @@ class _TRTGenerator:
             past.append(o[f"present_v_{i}"])
         return o["logits"], past
 
-    def _decode_trt(self, ids, pos, att, past):
+    def _decode_trt(self, ids, pos, att, past, branch: str = "mtp"):
+        """Run the TRT decode engine. `branch` selects which of the two engines
+        to use — the AR/MTP attention branch is constant-folded into each ONNX
+        graph at trace time (modeling_qwen2.py:1279 / dynamo=False), so we must
+        route by the input's semantic role:
+          branch='mtp' → llm_decode.engine, traced with `[real_last, mask×5]`
+                          (SDLM block-mask path). Use for the MTP forward.
+          branch='ar'  → llm_decode_ar.engine, traced with non-mask input_ids
+                          (canonical AR path). Use for KV-rebuild + AR fallback.
+        Picking the wrong engine produces correct STRUCTURE tokens but corrupt
+        content because the attention mask topology baked into the engine
+        doesn't match the runtime input semantics.
+        """
+        if branch == "mtp":
+            engine = self.r.decode_engine
+        elif branch == "ar":
+            engine = self.r.decode_engine_ar
+            if engine is None:
+                raise RuntimeError(
+                    "_decode_trt(branch='ar') called but decode_engine_ar is None. "
+                    "Re-export with the dual-engine pipeline: "
+                    "runner._wipe_stale_artifacts('add decode_ar'); "
+                    "runner.export_engines(); runner.build_engines(); runner.load_engines()."
+                )
+        else:
+            raise ValueError(f"branch must be 'mtp' or 'ar'; got {branch!r}")
         feed = {
             "input_ids":      ids.astype(np.int64),
             "position_ids":   pos.astype(np.int64),
@@ -134,7 +159,7 @@ class _TRTGenerator:
         for i in range(self.r.n_layers):
             feed[f"past_k_{i}"] = past[2 * i]
             feed[f"past_v_{i}"] = past[2 * i + 1]
-        o = self.r.decode_engine(feed)
+        o = engine(feed)
         nxt = []
         for i in range(self.r.n_layers):
             nxt.append(o[f"present_k_{i}"])
@@ -186,8 +211,20 @@ class _TRTGenerator:
     def _prefill(self, *a):
         return (self._prefill_trt if self.r.prefill_engine else self._prefill_pt)(*a)
 
-    def _decode(self, *a):
-        return (self._decode_trt if self.r.decode_engine else self._decode_pt)(*a)
+    def _decode_mtp(self, ids, pos, att, past):
+        """MTP-branch decode (input ends in text_mask_token_id). Uses the
+        TRT decode_engine when available, else PT (PT re-evaluates the branch
+        from runtime input so it auto-routes correctly)."""
+        if self.r.decode_engine is not None:
+            return self._decode_trt(ids, pos, att, past, branch="mtp")
+        return self._decode_pt(ids, pos, att, past)
+
+    def _decode_ar(self, ids, pos, att, past):
+        """AR-branch decode (input has no text_mask_token_id at the last
+        position). Uses the TRT decode_engine_ar when available, else PT."""
+        if self.r.decode_engine_ar is not None:
+            return self._decode_trt(ids, pos, att, past, branch="ar")
+        return self._decode_pt(ids, pos, att, past)
 
     # ---- main loop ----
     def generate(self, pixel_values, input_ids,
@@ -219,7 +256,9 @@ class _TRTGenerator:
                 pos = np.arange(P, P + BLOCK, dtype=np.int64)[None, :]
                 pos[:, -BLOCK:] -= 1
                 att = np.ones((1, P + BLOCK), dtype=np.int64)
-                logits_o, nxt = self._decode(mtp_ids, pos, att, past)
+                # MTP forward: input ends in mask_ids[-1] = text_mask_token_id,
+                # so we MUST use the mtp-baked engine (block-mask attention).
+                logits_o, nxt = self._decode_mtp(mtp_ids, pos, att, past)
                 lt = torch.from_numpy(logits_o.astype(np.float32))
                 gt = torch.from_numpy(generated).long()
                 probs, conf, x0, box_avg = sample_tokens(
@@ -275,31 +314,23 @@ class _TRTGenerator:
                 past = [t[:, :, :P, :] for t in nxt]  # truncate to pre-MTP
                 if pat.get("is_terminal") or int(self.r.TID["im_end_token_id"]) in toks:
                     break
-                # Re-run committed tokens through decode to refill kv with the
-                # correct (non-mask) attention states.
-                #
-                # CRITICAL: must use the PyTorch decode here, NOT the TRT engine.
-                # The TRT decode engine was exported with the last input token
-                # set to text_mask_token_id (export/llm.py:195), which causes
-                # modeling_qwen2.py:1279's data-dependent branch
-                #     if seq_length == 1 or input_ids[0][-1].item() != mask_id
-                # to constant-fold to the MTP block-mask path. dynamo=False
-                # bakes that branch decision into the ONNX graph, so the engine
-                # ALWAYS runs the mask-branch attention regardless of runtime
-                # inputs. Feeding it our real committed tokens corrupts the KV.
-                # PyTorch reevaluates the branch every forward and takes the
-                # correct AR path for real tokens.
+                # Re-run committed tokens through the AR-branch decode engine to
+                # refill kv with the correct (non-mask) attention states. The
+                # mtp engine has the SDLM block-mask path baked in (export/llm.py
+                # traces with text_mask_token_id at the last position); feeding
+                # it real committed tokens would corrupt the KV. The ar engine
+                # is traced with non-mask input_ids so modeling_qwen2.py:1279's
+                # data-dependent branch evaluates to the canonical AR path at
+                # trace time, baking that branch into the ONNX graph.
                 rebuild_pos = np.arange(P, P + len(toks), dtype=np.int64)[None, :]
                 rebuild_att = np.ones((1, P + len(toks)), dtype=np.int64)
-                _, past = self._decode_pt(tnp, rebuild_pos, rebuild_att, past)
+                _, past = self._decode_ar(tnp, rebuild_pos, rebuild_att, past)
             else:
                 last_id = generated[:, -1:]
                 pos = np.array([[P]], dtype=np.int64)
                 att = np.ones((1, P + 1), dtype=np.int64)
-                # Same reason as the MTP-commit rebuild above: AR feeds a single
-                # real (non-mask) token, but the TRT decode engine has the
-                # mask-branch baked in. Use PyTorch for the correct branch.
-                logits_o, nxt = self._decode_pt(last_id, pos, att, past)
+                # AR fallback: single real (non-mask) token → AR-branch engine.
+                logits_o, nxt = self._decode_ar(last_id, pos, att, past)
                 lt = torch.from_numpy(logits_o.astype(np.float32))
                 gt = torch.from_numpy(generated).long()
                 probs, conf, x0, *_ = sample_tokens_ar(
@@ -369,7 +400,15 @@ class LocateAnythingRunner:
         self.vit_engine = None
         self.proj_engine = None
         self.prefill_engine = None
+        # decode_engine:    SDLM block-mask branch (correct for MTP `[last, mask×5]`).
+        # decode_engine_ar: AR / non-block-mask branch (correct for AR steps and KV
+        #                   rebuilds where input_ids has no text_mask_token_id at the
+        #                   last position).
+        # modeling_qwen2.py:1279's data-dependent branch is constant-folded into
+        # each ONNX graph at trace time (dynamo=False), so we need BOTH engines.
+        # _TRTGenerator routes to the correct one based on the input's last token.
         self.decode_engine = None
+        self.decode_engine_ar = None
 
         # Resolution (populated by .export_engines())
         self.grid_h: Optional[int] = None
@@ -522,7 +561,7 @@ class LocateAnythingRunner:
         """
         from .export import (
             export_vision, export_projector,
-            export_llm_prefill, export_llm_decode,
+            export_llm_prefill, export_llm_decode, export_llm_decode_ar,
         )
 
         # Use the sample to determine the bake resolution.
@@ -583,12 +622,24 @@ class LocateAnythingRunner:
                 n_img_tokens=n_img_tokens,
                 onnx_path=ONNX_DIR / "llm_prefill.onnx",
             )
+            # MTP-branch decode: SDLM block-mask path baked in by tracing with
+            # text_mask_token_id at input_ids[0, -1].
             export_llm_decode(
                 lm_main, lm_head,
                 n_layers=self.n_layers, hidden_size=self.hidden_size,
                 n_kv_heads=self.n_kv_heads, head_dim=self.head_dim,
                 text_mask_token_id=int(self.config.text_config.text_mask_token_id),
                 onnx_path=ONNX_DIR / "llm_decode.onnx",
+            )
+            # AR-branch decode: non-mask input_ids baked into the trace so
+            # modeling_qwen2.py:1279's branch evaluates to the canonical AR path.
+            # Required for the post-MTP KV-rebuild and the AR fallback step;
+            # routing handled by _TRTGenerator.
+            export_llm_decode_ar(
+                lm_main, lm_head,
+                n_layers=self.n_layers, hidden_size=self.hidden_size,
+                n_kv_heads=self.n_kv_heads, head_dim=self.head_dim,
+                onnx_path=ONNX_DIR / "llm_decode_ar.onnx",
             )
         finally:
             if cast_for_export:
@@ -622,6 +673,8 @@ class LocateAnythingRunner:
             TRT_DIR / "llm_prefill.engine", TRT_DIR / "llm_decode.engine",
             hidden_size=self.hidden_size, n_layers=self.n_layers,
             n_kv_heads=self.n_kv_heads, head_dim=self.head_dim,
+            decode_ar_onnx=ONNX_DIR / "llm_decode_ar.onnx",
+            decode_ar_engine=TRT_DIR / "llm_decode_ar.engine",
         )
         # Stamp the runner so load_engines() knows the .engine files on disk
         # were built FROM the in-memory (rescued or not) model this session,
@@ -636,6 +689,9 @@ class LocateAnythingRunner:
         rescued = bool(getattr(self.model, "_locany_lm_head_was_rescued", False))
         rebuilt_this_session = bool(getattr(self, "_llm_engines_rebuilt_this_session", False))
         llm_engines_on_disk = any((TRT_DIR / f).exists() for f in ("llm_prefill.engine", "llm_decode.engine"))
+        # The AR-branch decode engine is required since the bc7c6bd era — an old
+        # cache may have llm_prefill+llm_decode but not llm_decode_ar.
+        decode_ar_present = (TRT_DIR / "llm_decode_ar.engine").exists()
         if rescued and llm_engines_on_disk and not rebuilt_this_session:
             raise RuntimeError(
                 "Cached TRT LLM engines exist on disk but the loaded model required "
@@ -647,12 +703,26 @@ class LocateAnythingRunner:
                 "    runner.build_engines()\n"
                 "    runner.load_engines()"
             )
+        if llm_engines_on_disk and not decode_ar_present and not rebuilt_this_session:
+            raise RuntimeError(
+                "Cached TRT LLM engines exist on disk but llm_decode_ar.engine is "
+                "MISSING. The decode-engine ONNX graph has the SDLM block-mask "
+                "attention branch constant-folded; AR steps and KV rebuilds need a "
+                "separate AR-branch-baked engine (llm_decode_ar.engine). Pre-dual-"
+                "engine artifacts cannot serve correct TRT inference. Re-export:\n"
+                "    runner._wipe_stale_artifacts('add decode_ar engine')\n"
+                "    runner.export_engines()\n"
+                "    runner.build_engines()\n"
+                "    runner.load_engines()"
+            )
         if (TRT_DIR / "vision.engine").exists():
             self.vit_engine = TRTEngine(TRT_DIR / "vision.engine")
         if (TRT_DIR / "projector.engine").exists():
             self.proj_engine = TRTEngine(TRT_DIR / "projector.engine")
         if (TRT_DIR / "llm_prefill.engine").exists():
             self.prefill_engine = TRTEngine(TRT_DIR / "llm_prefill.engine")
+        if (TRT_DIR / "llm_decode_ar.engine").exists():
+            self.decode_engine_ar = TRTEngine(TRT_DIR / "llm_decode_ar.engine")
         if (TRT_DIR / "llm_decode.engine").exists():
             self.decode_engine = TRTEngine(TRT_DIR / "llm_decode.engine")
         # Lock the processor's resize to match the baked engine resolution.
@@ -662,7 +732,8 @@ class LocateAnythingRunner:
               f"vit={'yes' if self.vit_engine else 'no'}, "
               f"proj={'yes' if self.proj_engine else 'no'}, "
               f"prefill={'yes' if self.prefill_engine else 'no'}, "
-              f"decode={'yes' if self.decode_engine else 'no'}")
+              f"decode_mtp={'yes' if self.decode_engine else 'no'}, "
+              f"decode_ar={'yes' if self.decode_engine_ar else 'no'}")
 
     # ----- inference -----
     def _detect_via_trt(self, image: Image.Image, prompt: str,
