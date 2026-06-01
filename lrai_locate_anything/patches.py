@@ -101,63 +101,94 @@ class Rope2DReal(torch.nn.Module):
 # ---------------------------------------------------------------------------
 # 3) Apply all three to the live model
 # ---------------------------------------------------------------------------
-def apply_vision_patches(model, verbose: bool = True) -> None:
+def apply_vision_patches(model, verbose: bool = True) -> dict:
     """Patch the loaded model in-place.
 
-    Called AFTER `AutoModel.from_pretrained` because transformers' dynamic-module
-    loader registers modules under `transformers_modules.<hash>.modeling_*`. We
-    locate those via `sys.modules[type(model).__module__]` and rebind there — that's
-    the module the running model's methods actually look up names against.
+    Returns a dict carrying the originals so the patches can be reverted via
+    `restore_vision_patches(model, snapshot)` — used by the diagnostic fallback
+    in LocateAnythingRunner.detect() to A/B against canonical model behaviour
+    when patched inference produces degenerate output.
     """
     mvit_mod = sys.modules[type(model.vision_model).__module__]
+    snapshot: dict = {"module": mvit_mod, "attrs": {}, "vl_funcs": None, "rope_swap": None, "class_apply_rope": {}}
 
-    # (a) Vision attention: rebind every variant the model might pick from.
+    # (a) Vision attention.
     for nm in ("multihead_attention", "sdpa_attention", "eager_attention", "flash_attn_varlen_func"):
         if hasattr(mvit_mod, nm):
+            snapshot["attrs"][nm] = getattr(mvit_mod, nm)
             setattr(mvit_mod, nm, sdpa_packed)
     if hasattr(mvit_mod, "VL_VISION_ATTENTION_FUNCTIONS"):
+        snapshot["vl_funcs"] = dict(mvit_mod.VL_VISION_ATTENTION_FUNCTIONS)
         for k in list(mvit_mod.VL_VISION_ATTENTION_FUNCTIONS.keys()):
             mvit_mod.VL_VISION_ATTENTION_FUNCTIONS[k] = sdpa_packed
 
-    # (b) apply_rope rebind. Some classes capture the function into their __dict__
-    # at import time; rebind those instance attributes too.
+    # (b) apply_rope rebind. Some classes capture into __dict__ at import time.
+    if hasattr(mvit_mod, "apply_rope"):
+        snapshot["attrs"]["apply_rope"] = mvit_mod.apply_rope
     mvit_mod.apply_rope = apply_rope_real
     for _name in dir(mvit_mod):
         obj = getattr(mvit_mod, _name)
         if isinstance(obj, type) and "apply_rope" in getattr(obj, "__dict__", {}):
+            snapshot["class_apply_rope"][_name] = obj.__dict__["apply_rope"]
             setattr(obj, "apply_rope", apply_rope_real)
 
-    # (c) Rope2DPosEmb instance swap. Walk to find it; common names vary.
+    # (c) Rope2DPosEmb instance swap.
     vm = model.vision_model
     target = None
     for nm in ("rope_2d", "rope2d", "pos_emb_2d", "rope_emb"):
         if hasattr(vm, nm):
-            target = (vm, nm, getattr(vm, nm))
-            break
+            target = (vm, nm, getattr(vm, nm)); break
     if target is None:
         for sub_name, sub in vm.named_modules():
             if type(sub).__name__.startswith("Rope2D") and hasattr(sub, "freqs_cis"):
                 parts = sub_name.split(".")
                 parent = vm
-                for p in parts[:-1]:
-                    parent = getattr(parent, p)
-                target = (parent, parts[-1], sub)
-                break
+                for p in parts[:-1]: parent = getattr(parent, p)
+                target = (parent, parts[-1], sub); break
     if target is not None:
         parent, leaf, old = target
         new = Rope2DReal(old).to(device=old.freqs_cis.device)
         setattr(parent, leaf, new)
-        if verbose:
-            print(f"[patches] swapped {type(old).__name__} -> Rope2DReal at .{leaf}")
+        snapshot["rope_swap"] = (parent, leaf, old)
+        if verbose: print(f"[patches] swapped {type(old).__name__} -> Rope2DReal at .{leaf}")
     elif verbose:
-        print("[patches] WARN: no Rope2DPosEmb instance found; relying on apply_rope_real's complex-input fallback")
+        print("[patches] WARN: no Rope2DPosEmb instance found")
 
-    # (d) Belt-and-braces: neutralise 'magi' attention if it's still set.
+    # (d) Neutralise 'magi' attention.
     cfg = model.config
-    if getattr(cfg, "_attn_implementation", None) == "magi":
-        cfg._attn_implementation = "sdpa"
-    if hasattr(cfg, "text_config") and getattr(cfg.text_config, "_attn_implementation", None) == "magi":
+    snapshot["magi"] = {
+        "outer": getattr(cfg, "_attn_implementation", None),
+        "text":  getattr(getattr(cfg, "text_config", None), "_attn_implementation", None),
+    }
+    if cfg._attn_implementation == "magi": cfg._attn_implementation = "sdpa"
+    if hasattr(cfg, "text_config") and cfg.text_config._attn_implementation == "magi":
         cfg.text_config._attn_implementation = "sdpa"
 
-    if verbose:
-        print("[patches] vision patches applied to loaded model")
+    if verbose: print("[patches] vision patches applied to loaded model")
+    return snapshot
+
+
+def restore_vision_patches(model, snapshot: dict, verbose: bool = False) -> None:
+    """Revert what apply_vision_patches did, using the snapshot it returned.
+
+    Used by the diagnostic A/B path: temporarily restore canonical attention/RoPE
+    to test whether patched inference is degrading output.
+    """
+    mvit_mod = snapshot["module"]
+    for nm, fn in snapshot["attrs"].items():
+        setattr(mvit_mod, nm, fn)
+    if snapshot["vl_funcs"] is not None and hasattr(mvit_mod, "VL_VISION_ATTENTION_FUNCTIONS"):
+        mvit_mod.VL_VISION_ATTENTION_FUNCTIONS.clear()
+        mvit_mod.VL_VISION_ATTENTION_FUNCTIONS.update(snapshot["vl_funcs"])
+    for cls_name, fn in snapshot["class_apply_rope"].items():
+        setattr(getattr(mvit_mod, cls_name), "apply_rope", fn)
+    if snapshot["rope_swap"] is not None:
+        parent, leaf, orig = snapshot["rope_swap"]
+        setattr(parent, leaf, orig)
+    if "magi" in snapshot:
+        cfg = model.config
+        if snapshot["magi"]["outer"] is not None:
+            cfg._attn_implementation = snapshot["magi"]["outer"]
+        if snapshot["magi"]["text"] is not None and hasattr(cfg, "text_config"):
+            cfg.text_config._attn_implementation = snapshot["magi"]["text"]
+    if verbose: print("[patches] reverted to canonical vision functions")

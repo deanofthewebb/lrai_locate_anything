@@ -220,12 +220,15 @@ class _TRTGenerator:
 class LocateAnythingRunner:
     """High-level API: load model, export + build engines on demand, run inference."""
 
-    def __init__(self, model, tokenizer, processor, config, local_dir: Path):
+    def __init__(self, model, tokenizer, processor, config, local_dir: Path, patches_snapshot=None):
         self.model = model
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
         self.local_dir = local_dir
+        # Snapshot returned by apply_vision_patches — enables temporary patch revert
+        # for the A/B diagnostic fallback inside detect().
+        self.patches_snapshot = patches_snapshot
 
         # LLM shape constants
         tc = config.text_config
@@ -288,10 +291,10 @@ class LocateAnythingRunner:
         the baked engine size. If None, a tiny default image is used (grid 36x46).
         """
         ensure_nvidia_stack(verbose=False)
-        model, tokenizer, processor, config, local = load_locateanything_3b(
+        model, tokenizer, processor, config, local, snap = load_locateanything_3b(
             local_dir=local_dir, model_id=model_id,
         )
-        runner = cls(model, tokenizer, processor, config, local)
+        runner = cls(model, tokenizer, processor, config, local, patches_snapshot=snap)
         if auto_export:
             runner.export_engines(sample_image=sample_image, sample_prompt=sample_prompt)
             runner.build_engines()
@@ -424,25 +427,42 @@ class LocateAnythingRunner:
         return parse_boxes(text, self.eng_img_w, self.eng_img_h), text
 
     def _detect_via_pt(self, image: Image.Image, prompt: str,
-                        max_new_tokens: int, generation_mode: str = "hybrid") -> Tuple[List, str]:
+                        max_new_tokens: int, generation_mode: str = "hybrid",
+                        unpatched: bool = False) -> Tuple[List, str]:
         """PyTorch canonical generate(). Used as auto-fallback when TRT returns 0 boxes
-        (only available if `model` is still resident on GPU)."""
+        (only available if `model` is still resident on GPU).
+
+        unpatched=True temporarily reverts apply_vision_patches() so the model runs
+        with the ORIGINAL canonical vision functions. Used as the 3rd-tier fallback
+        when both patched-TRT and patched-PT produce degenerate output, to isolate
+        whether the patches are responsible.
+        """
         if self.model is None:
             return [], ""
-        img_eng = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
-        enc = self._processor_call(img_eng, prompt)
-        with torch.inference_mode():
-            out = self.model.generate(
-                pixel_values=enc["pixel_values"], input_ids=enc["input_ids"],
-                attention_mask=enc["attention_mask"], image_grid_hws=enc["image_grid_hws"],
-                tokenizer=self.tokenizer, max_new_tokens=max_new_tokens, use_cache=True,
-                generation_mode=generation_mode, do_sample=False, verbose=False,
-            )
-        ot = out[0] if isinstance(out, tuple) else out
-        if torch.is_tensor(ot):
-            text = self.tokenizer.decode(ot[0, enc["input_ids"].shape[1]:], skip_special_tokens=False)
-        else:
-            text = str(ot)
+        from .patches import restore_vision_patches, apply_vision_patches
+        new_snap = None
+        if unpatched and self.patches_snapshot is not None:
+            restore_vision_patches(self.model, self.patches_snapshot)
+        try:
+            img_eng = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
+            enc = self._processor_call(img_eng, prompt)
+            with torch.inference_mode():
+                out = self.model.generate(
+                    pixel_values=enc["pixel_values"], input_ids=enc["input_ids"],
+                    attention_mask=enc["attention_mask"], image_grid_hws=enc["image_grid_hws"],
+                    tokenizer=self.tokenizer, max_new_tokens=max_new_tokens, use_cache=True,
+                    generation_mode=generation_mode, do_sample=False, verbose=False,
+                )
+            ot = out[0] if isinstance(out, tuple) else out
+            if torch.is_tensor(ot):
+                text = self.tokenizer.decode(ot[0, enc["input_ids"].shape[1]:], skip_special_tokens=False)
+            else:
+                text = str(ot)
+        finally:
+            # Re-apply patches so subsequent TRT calls (which expect patched modules) work.
+            if unpatched and self.patches_snapshot is not None:
+                new_snap = apply_vision_patches(self.model, verbose=False)
+                self.patches_snapshot = new_snap
         return parse_boxes(text, self.eng_img_w, self.eng_img_h), text
 
     def detect(self, image, prompt: str = "Detect all objects. Return bounding boxes.",
@@ -473,21 +493,46 @@ class LocateAnythingRunner:
         boxes_eng, text = self._detect_via_trt(image, prompt, max_new_tokens, generation_mode)
         path_used = "trt"
 
-        # 2) Auto-fallback to PyTorch if TRT produced nothing
+        # 2) Auto-fallback to PyTorch (patched, same vision-patch code as TRT) if TRT 0
+        pt_text = None
+        unpatched_text = None
         if len(boxes_eng) == 0 and auto_fallback_to_pt and self.model is not None:
             if verbose or diagnostic:
                 print(f"[detect] TRT returned 0 boxes; auto-falling back to PyTorch canonical generate()...")
             pt_boxes_eng, pt_text = self._detect_via_pt(image, prompt, max_new_tokens, generation_mode)
             if len(pt_boxes_eng) > 0:
                 if verbose or diagnostic:
-                    print(f"[detect] PyTorch returned {len(pt_boxes_eng)} boxes. Using PT result.")
+                    print(f"[detect] PyTorch (patched) returned {len(pt_boxes_eng)} boxes. Using PT result.")
                 boxes_eng, text = pt_boxes_eng, pt_text
-                path_used = "pt_fallback"
+                path_used = "pt_patched"
             else:
-                if verbose or diagnostic:
-                    print(f"[detect] PyTorch also returned 0 boxes. Issue is upstream of TRT (prompt/template/model).")
-                # Store PT text too so the dump has both
-                text = f"### TRT output ###\n{text}\n### PyTorch output ###\n{pt_text}\n"
+                # 3) Both patched paths failed — try unpatched canonical PyTorch.
+                # If THAT works, our vision patches are the culprit; if not, the
+                # issue is upstream of the patches entirely (prompt/template/model).
+                if self.patches_snapshot is not None:
+                    if verbose or diagnostic:
+                        print(f"[detect] PT (patched) also 0. Trying CANONICAL (patches reverted)...")
+                    unpatched_boxes_eng, unpatched_text = self._detect_via_pt(
+                        image, prompt, max_new_tokens, generation_mode, unpatched=True,
+                    )
+                    if len(unpatched_boxes_eng) > 0:
+                        if verbose or diagnostic:
+                            print(f"[detect] CANONICAL (unpatched) returned {len(unpatched_boxes_eng)} boxes!")
+                            print(f"[detect] ⚠️  Vision patches are degrading the model.  "
+                                  f"Patched ONNX/TRT engines were built from a broken state — re-export needed.")
+                        boxes_eng, text = unpatched_boxes_eng, unpatched_text
+                        path_used = "pt_unpatched_canonical"
+                    else:
+                        if verbose or diagnostic:
+                            print(f"[detect] CANONICAL (unpatched) also 0. Issue is upstream of patches "
+                                  f"(prompt / chat template / image preprocessing / model).")
+                # Compose the diagnostic-dump text from all attempted paths
+                segments = [f"### TRT (path=trt, patched) ###\n{text}"]
+                if pt_text is not None:
+                    segments.append(f"### PyTorch (patched canonical) ###\n{pt_text}")
+                if unpatched_text is not None:
+                    segments.append(f"### PyTorch (CANONICAL, patches reverted) ###\n{unpatched_text}")
+                text = "\n\n".join(segments) + "\n"
 
         # 3) Scale boxes back to original image
         sx, sy = orig_w / self.eng_img_w, orig_h / self.eng_img_h

@@ -14,7 +14,7 @@ from huggingface_hub import snapshot_download
 
 from .config import MODEL_ID, REF_DTYPE, WEIGHTS_DIR
 from .shims import install_transformers_shims, rehydrate_config
-from .patches import apply_vision_patches
+from .patches import apply_vision_patches, restore_vision_patches
 
 
 def download_weights(model_id: str = MODEL_ID, local_dir: Path | None = None) -> Path:
@@ -95,10 +95,11 @@ def load_locateanything_3b(
             f"lm={sum(p.numel() for p in model.language_model.parameters())/1e9:.2f} B)"
         )
 
+    patches_snapshot = None
     if apply_patches:
-        apply_vision_patches(model, verbose=verbose)
+        patches_snapshot = apply_vision_patches(model, verbose=verbose)
 
-    return model, tokenizer, processor, config, local
+    return model, tokenizer, processor, config, local, patches_snapshot
 
 
 def normalize_image_grid_hws(inputs: dict, pixel_values_key: str = "pixel_values"):
