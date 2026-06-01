@@ -283,7 +283,7 @@ class LocateAnythingRunner:
         local_dir: Optional[Path] = None,
         auto_export: bool = False,
         sample_image: Optional[Path] = None,
-        sample_prompt: str = "Detect all cats. Return bounding boxes.",
+        sample_prompt: str = "Locate all the instances that matches the following description: cat.",
     ) -> "LocateAnythingRunner":
         """Load model + (optionally) export and build engines on first run.
 
@@ -313,7 +313,7 @@ class LocateAnythingRunner:
         enc["pixel_values"] = enc["pixel_values"].to(REF_DTYPE)
         return enc
 
-    def export_engines(self, sample_image: Optional[Path] = None, sample_prompt: str = "Detect all cats."):
+    def export_engines(self, sample_image: Optional[Path] = None, sample_prompt: str = "Locate all the instances that matches the following description: cat."):
         """Run the four exports (vision, projector, llm_prefill, llm_decode).
 
         The vision engine bakes pos_emb at the resolution implied by `sample_image`.
@@ -421,7 +421,7 @@ class LocateAnythingRunner:
         _, toks = self._gen.generate(
             px_np, ids_np,
             max_new_tokens=max_new_tokens, generation_mode=generation_mode,
-            temperature=0.0, top_p=1.0, repetition_penalty=1.0,
+            temperature=0.0, top_p=1.0, repetition_penalty=1.1,
         )
         text = self.tokenizer.decode(toks, skip_special_tokens=False)
         return parse_boxes(text, self.eng_img_w, self.eng_img_h), text
@@ -451,7 +451,8 @@ class LocateAnythingRunner:
                     pixel_values=enc["pixel_values"], input_ids=enc["input_ids"],
                     attention_mask=enc["attention_mask"], image_grid_hws=enc["image_grid_hws"],
                     tokenizer=self.tokenizer, max_new_tokens=max_new_tokens, use_cache=True,
-                    generation_mode=generation_mode, do_sample=False, verbose=False,
+                    generation_mode=generation_mode, do_sample=False, repetition_penalty=1.1,
+                    verbose=False,
                 )
             ot = out[0] if isinstance(out, tuple) else out
             if torch.is_tensor(ot):
@@ -465,7 +466,7 @@ class LocateAnythingRunner:
                 self.patches_snapshot = new_snap
         return parse_boxes(text, self.eng_img_w, self.eng_img_h), text
 
-    def detect(self, image, prompt: str = "Detect all objects. Return bounding boxes.",
+    def detect(self, image, prompt: str = "Locate all the instances that matches the following description: object.",
                max_new_tokens: int = 128, generation_mode: str = "hybrid",
                diagnostic: bool = True, auto_fallback_to_pt: bool = True,
                verbose: bool = False) -> Tuple[List, str]:

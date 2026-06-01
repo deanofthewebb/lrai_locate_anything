@@ -27,7 +27,7 @@ from .parse import iou
 def run_image(
     runner: LocateAnythingRunner,
     image,
-    prompt: str = "Detect all objects. Return bounding boxes.",
+    prompt: str = "Locate all the instances that matches the following description: object.",
     max_new_tokens: int = 128,
     draw: bool = True,
 ) -> Tuple[List[Tuple[float, float, float, float]], Image.Image, str]:
@@ -51,7 +51,7 @@ def run_video(
     runner: LocateAnythingRunner,
     input_path: Path | str,
     output_path: Path | str,
-    prompt: str = "Detect all people and luggage. Return bounding boxes.",
+    prompt: str = "Locate all the instances that matches the following description: person</c>luggage.",
     max_frames: int = 40,
     max_new_tokens: int = 120,
     generation_mode: str = "hybrid",
@@ -115,7 +115,7 @@ def run_compare(
     runner: LocateAnythingRunner,
     input_path: Path | str,
     output_path: Path | str,
-    prompt: str = "Detect all luggage and people.",
+    prompt: str = "Locate all the instances that matches the following description: luggage</c>person.",
     max_frames: int = 30,
     panel_w: int = 640,
     panel_h: int = 360,
@@ -144,7 +144,8 @@ def run_compare(
                     pixel_values=enc["pixel_values"], input_ids=enc["input_ids"],
                     attention_mask=enc["attention_mask"], image_grid_hws=enc["image_grid_hws"],
                     tokenizer=runner.tokenizer, max_new_tokens=128, use_cache=True,
-                    generation_mode="hybrid", do_sample=False, verbose=False,
+                    generation_mode="hybrid", do_sample=False, repetition_penalty=1.1,
+                    verbose=False,
                 )
             ot = out[0] if isinstance(out, tuple) else out
             if torch.is_tensor(ot):

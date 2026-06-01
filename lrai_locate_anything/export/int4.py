@@ -23,7 +23,7 @@ import torch
 
 def _default_calib_texts() -> List[str]:
     return [
-        "Detect all cats. Return bounding boxes.",
+        "Locate all the instances that matches the following description: cat.",
         "Find every person in the image and bound each one.",
         "Where are the red cars? Provide bounding boxes for each.",
         "List bounding boxes for every animal visible.",
