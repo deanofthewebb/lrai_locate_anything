@@ -145,14 +145,19 @@ def apply_vision_patches(model, verbose: bool = True) -> dict:
                 parent = vm
                 for p in parts[:-1]: parent = getattr(parent, p)
                 target = (parent, parts[-1], sub); break
-    if target is not None:
-        parent, leaf, old = target
-        new = Rope2DReal(old).to(device=old.freqs_cis.device)
-        setattr(parent, leaf, new)
-        snapshot["rope_swap"] = (parent, leaf, old)
-        if verbose: print(f"[patches] swapped {type(old).__name__} -> Rope2DReal at .{leaf}")
-    elif verbose:
-        print("[patches] WARN: no Rope2DPosEmb instance found")
+    if target is None:
+        raise RuntimeError(
+            "apply_vision_patches: no Rope2DPosEmb instance found on model.vision_model. "
+            "The vision encoder needs its 2D RoPE module swapped to a real-valued "
+            "implementation for ONNX export; without it, the export will fail with "
+            "'view_as_complex is not supported'. If the model architecture changed, "
+            "extend the search list in this function or remove the swap entirely."
+        )
+    parent, leaf, old = target
+    new = Rope2DReal(old).to(device=old.freqs_cis.device)
+    setattr(parent, leaf, new)
+    snapshot["rope_swap"] = (parent, leaf, old)
+    if verbose: print(f"[patches] swapped {type(old).__name__} -> Rope2DReal at .{leaf}")
 
     # (d) Neutralise 'magi' attention.
     cfg = model.config

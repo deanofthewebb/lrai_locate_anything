@@ -78,12 +78,8 @@ def run_video(
             break
         rgb = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         t0 = time.time()
-        try:
-            boxes, _ = runner.detect(rgb, prompt, max_new_tokens=max_new_tokens,
-                                      generation_mode=generation_mode)
-        except Exception as e:
-            print(f"  frame {i}: {e}")
-            boxes = []
+        boxes, _ = runner.detect(rgb, prompt, max_new_tokens=max_new_tokens,
+                                  generation_mode=generation_mode)
         latencies.append((time.time() - t0) * 1000)
         for (x1, y1, x2, y2) in boxes:
             cv2.rectangle(bgr, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
@@ -187,11 +183,7 @@ def run_compare(
         panels, boxes_per = [], []
         for name, fn in paths:
             ts = time.time()
-            try:
-                boxes, _ = fn(rgb)
-            except Exception as e:
-                print(f"  frame {i} [{name}]: {e}")
-                boxes = []
+            boxes, _ = fn(rgb)
             ms = (time.time() - ts) * 1000
             metrics[name]["lat_ms"].append(ms)
             metrics[name]["n_dets"].append(len(boxes))

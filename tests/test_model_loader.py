@@ -90,13 +90,15 @@ class TestLockProcessorResolution:
         with pytest.raises(RuntimeError, match="exceeds processor pos-emb ceiling"):
             lock_processor_resolution(proc, eng_img_w=512 * 14, eng_img_h=28, verbose=False)
 
-    def test_warns_when_attrs_missing(self):
-        """Processor that lacks patch_size/merge_kernel_size/in_token_limit should
-        warn and return (not crash)."""
+    def test_raises_when_attrs_missing(self):
+        """Processor that lacks patch_size/merge_kernel_size/in_token_limit must
+        RAISE — silent warn-and-return was a bandaid that let the engine receive
+        a different grid_hws than baked."""
         from lrai_locate_anything.model_loader import lock_processor_resolution
 
         class _IP:
             pass
         class _Proc:
             image_processor = _IP()
-        lock_processor_resolution(_Proc(), 644, 504, verbose=False)  # no raise
+        with pytest.raises(RuntimeError, match="lacks one or more of"):
+            lock_processor_resolution(_Proc(), 644, 504, verbose=False)

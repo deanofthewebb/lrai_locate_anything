@@ -98,14 +98,16 @@ class TestEnsureLmHeadTied:
         h_ptr_after = m.language_model.lm_head.weight.data_ptr()
         assert e_ptr_after == h_ptr_after, "lm_head.weight must share storage with embed_tokens.weight"
 
-    def test_handles_missing_language_model(self):
-        """Don't crash on a model without .language_model."""
+    def test_raises_on_missing_language_model(self):
+        """A model without .language_model must RAISE — the rescue can't proceed
+        and silent no-op was a bandaid that hid real architecture mismatches."""
         from lrai_locate_anything.model_loader import _ensure_lm_head_tied
         class _M(torch.nn.Module):
             pass
         m = _M()
         m.config = type("Cfg", (), {})()
-        assert _ensure_lm_head_tied(m, verbose=False) is False  # no-op, no crash
+        with pytest.raises(RuntimeError, match="no .language_model attribute"):
+            _ensure_lm_head_tied(m, verbose=False)
 
     def test_tie_weights_fallback_to_direct_assignment(self):
         """If model.tie_weights() raises, fall back to head.weight = embed.weight."""

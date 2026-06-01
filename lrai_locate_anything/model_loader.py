@@ -131,16 +131,20 @@ def _ensure_lm_head_tied(model, verbose: bool = True) -> bool:
     """
     lm = getattr(model, "language_model", None)
     if lm is None:
-        if verbose:
-            print("[loader] WARN: no model.language_model — skipping tie check")
-        return False
+        raise RuntimeError(
+            "_ensure_lm_head_tied: model has no .language_model attribute. The "
+            "rescue cannot run without it. If the model architecture changed, "
+            "update this function to locate embed_tokens and lm_head."
+        )
     lm_main = getattr(lm, "model", lm)
     embed = getattr(lm_main, "embed_tokens", None)
     head = getattr(lm, "lm_head", None)
     if embed is None or head is None:
-        if verbose:
-            print(f"[loader] WARN: cannot locate embed_tokens or lm_head (embed={embed!r}, head={head!r})")
-        return False
+        raise RuntimeError(
+            f"_ensure_lm_head_tied: cannot locate embed_tokens or lm_head "
+            f"(embed={embed!r}, head={head!r}). The rescue requires both to be "
+            f"accessible; check the model architecture."
+        )
 
     tie_flag = getattr(getattr(model.config, "text_config", None), "tie_word_embeddings", None)
     if tie_flag is None:
@@ -265,9 +269,14 @@ def lock_processor_resolution(processor, eng_img_w: int, eng_img_h: int, verbose
     mk = getattr(ip, "merge_kernel_size", None)
     tl = getattr(ip, "in_token_limit", None)
     if P is None or mk is None or tl is None:
-        if verbose:
-            print(f"[loader] WARN: image_processor lacks patch_size/merge_kernel_size/in_token_limit (type={type(ip).__name__}); cannot lock")
-        return
+        raise RuntimeError(
+            f"lock_processor_resolution: image_processor (type={type(ip).__name__}) "
+            f"lacks one or more of patch_size={P!r}, merge_kernel_size={mk!r}, "
+            f"in_token_limit={tl!r}. Cannot lock to engine resolution; the engine "
+            f"would receive a different grid_hws than baked. Check that the model "
+            f"is loaded with use_fast=False and that the LocateAnything processor "
+            f"is actually instantiated."
+        )
     mk_h, mk_w = int(mk[0]), int(mk[1])
     grid_w = eng_img_w // P
     grid_h = eng_img_h // P

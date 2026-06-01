@@ -458,21 +458,32 @@ class LocateAnythingRunner:
         )
 
     def build_engines(self, llm: bool = True):
+        """Build vision + projector engines, and optionally the LLM prefill/decode
+        engines. If llm=True and enable_llm_trt() returns False (insufficient VRAM),
+        we RAISE — no silent skip. Pass llm=False to explicitly opt out and run
+        the LM via PyTorch on the same device.
+        """
         from .trt.build import build_vision, build_projector, build_llm
         assert self.grid_h is not None, "call export_engines() first"
         L_pre = self.grid_h * self.grid_w
         L_post = L_pre // 4
         build_vision(ONNX_DIR / "vision.onnx", TRT_DIR / "vision.engine", L_pre)
         build_projector(ONNX_DIR / "projector.onnx", TRT_DIR / "projector.engine", L_post)
-        if llm and enable_llm_trt():
-            build_llm(
-                ONNX_DIR / "llm_prefill.onnx", ONNX_DIR / "llm_decode.onnx",
-                TRT_DIR / "llm_prefill.engine", TRT_DIR / "llm_decode.engine",
-                hidden_size=self.hidden_size, n_layers=self.n_layers,
-                n_kv_heads=self.n_kv_heads, head_dim=self.head_dim,
+        if not llm:
+            return
+        if not enable_llm_trt():
+            raise RuntimeError(
+                "build_engines: enable_llm_trt() returned False (insufficient VRAM "
+                "headroom for LLM TRT build). Pass llm=False to explicitly skip the "
+                "LLM engine and run the language model via PyTorch instead. "
+                "Silent-skip is disabled — the choice must be intentional."
             )
-        elif llm:
-            print("[runner] LLM TRT build skipped (insufficient VRAM); orchestrator will use PyTorch fallback")
+        build_llm(
+            ONNX_DIR / "llm_prefill.onnx", ONNX_DIR / "llm_decode.onnx",
+            TRT_DIR / "llm_prefill.engine", TRT_DIR / "llm_decode.engine",
+            hidden_size=self.hidden_size, n_layers=self.n_layers,
+            n_kv_heads=self.n_kv_heads, head_dim=self.head_dim,
+        )
 
     def load_engines(self):
         from .trt.engine import TRTEngine
@@ -506,8 +517,8 @@ class LocateAnythingRunner:
         print(f"[runner] engines loaded: "
               f"vit={'yes' if self.vit_engine else 'no'}, "
               f"proj={'yes' if self.proj_engine else 'no'}, "
-              f"prefill={'yes' if self.prefill_engine else 'no (PT fallback)'}, "
-              f"decode={'yes' if self.decode_engine else 'no (PT fallback)'}")
+              f"prefill={'yes' if self.prefill_engine else 'no'}, "
+              f"decode={'yes' if self.decode_engine else 'no'}")
 
     # ----- inference -----
     def _detect_via_trt(self, image: Image.Image, prompt: str,
@@ -566,7 +577,10 @@ class LocateAnythingRunner:
         Returns boxes in ORIGINAL image pixel space.
         """
         if self.model is None:
-            return [], ""
+            raise RuntimeError(
+                "_detect_via_pt called but self.model is None. The PyTorch model is "
+                "required for this path. Reload via LocateAnythingRunner.from_pretrained()."
+            )
         from .patches import restore_vision_patches, apply_vision_patches
         new_snap = None
         if unpatched and self.patches_snapshot is not None:
@@ -596,170 +610,163 @@ class LocateAnythingRunner:
 
     def detect(self, image, prompt: str = "Locate all the instances that matches the following description: object.",
                max_new_tokens: int = 128, generation_mode: str = "hybrid",
-               diagnostic: bool = True, auto_fallback_to_pt: bool = True,
-               verbose: bool = False) -> Tuple[List, str]:
+               path: str = "auto", diagnostic: bool = True, verbose: bool = False,
+               ) -> Tuple[List, str]:
         """Single-image inference. Returns (boxes, raw_decoded_text).
 
         boxes are (x1, y1, x2, y2) in original image pixel space.
 
         Parameters
         ----------
-        diagnostic         : write WORK/'last_inference.txt' (raw text + metadata).
-                             On 0 boxes also prints a one-line preview to stdout so
-                             notebook staleness can't hide the diagnostic.
-        auto_fallback_to_pt: when TRT returns 0 boxes AND `self.model` is resident,
-                             automatically retry via canonical model.generate(). If
-                             PT returns boxes, use that result. This converts the
-                             two-step manual diagnose-and-fall-back I was previously
-                             pushing into notebook cells into a single transparent call.
-        verbose            : always print raw text + token count, not just on failure.
+        path        : "auto" (TRT if engines loaded else PT), "trt", or "pt".
+                      Explicit choice — NO silent retry on failure.
+        diagnostic  : write WORK/'last_inference.txt' with the rendered prompt,
+                      token ids, grid_hws, and raw model output. NOT a fallback —
+                      always runs the same single path. Used to inspect what the
+                      model actually saw.
+        verbose     : print raw text + token count.
+
+        Raises
+        ------
+        RuntimeError: prompt couldn't be canonicalized to the training phrasing,
+                      requested path is unavailable, or the model produced no
+                      <box> tags. NO silent return-zero — if you want to inspect
+                      a failure, call .diagnose() explicitly.
         """
         if isinstance(image, (str, Path)):
             image = Image.open(image).convert("RGB")
         orig_w, orig_h = image.size
 
-        # Auto-canonicalize OOD prompts. The model is trained on a specific phrasing;
-        # natural-language alternatives like "Detect all cats. Return bounding boxes."
-        # cause MTP mode-collapse. We rewrite transparently.
+        # Canonicalize the prompt. The model is trained on a specific phrasing;
+        # any other phrasing produces mode-collapse. If canonicalize_prompt can't
+        # rewrite the prompt to canonical form, REFUSE to run — no silent garbage.
         canonical_prompt, rewritten = canonicalize_prompt(prompt)
         if rewritten and (diagnostic or verbose):
-            print(f"[detect] prompt auto-canonicalized:")
-            print(f"          input:     {prompt!r}")
-            print(f"          rewritten: {canonical_prompt!r}")
-        elif not rewritten and "matches the following description:" not in prompt.lower():
-            print(f"[detect] WARN: prompt is not in canonical form; model may produce")
-            print(f"          degenerate output. Canonical form is:")
-            print(f"          'Locate all the instances that matches the following description: <X>.'")
+            print(f"[detect] prompt auto-canonicalized:\n          input:     {prompt!r}\n          rewritten: {canonical_prompt!r}")
+        if not rewritten and "matches the following description:" not in canonical_prompt.lower():
+            raise RuntimeError(
+                f"Prompt is not in canonical form and could not be auto-rewritten: {prompt!r}\n"
+                f"The model only accepts: "
+                f"'Locate all the instances that matches the following description: <X>.'\n"
+                f"Pass a canonical prompt, or extend canonicalize_prompt() to recognize "
+                f"the phrasing you intend to use."
+            )
         prompt = canonical_prompt
 
-        # 1) TRT path
-        boxes_eng, text = self._detect_via_trt(image, prompt, max_new_tokens, generation_mode)
-        path_used = "trt"
-
-        # 2) Auto-fallback to PyTorch (patched, same vision-patch code as TRT) if TRT 0
-        pt_text = None
-        unpatched_text = None
-        if len(boxes_eng) == 0 and auto_fallback_to_pt and self.model is not None:
-            if verbose or diagnostic:
-                print(f"[detect] TRT returned 0 boxes; auto-falling back to PyTorch canonical generate()...")
-            pt_boxes_eng, pt_text = self._detect_via_pt(image, prompt, max_new_tokens, generation_mode)
-            if len(pt_boxes_eng) > 0:
-                if verbose or diagnostic:
-                    print(f"[detect] PyTorch (patched) returned {len(pt_boxes_eng)} boxes. Using PT result.")
-                boxes_eng, text = pt_boxes_eng, pt_text
-                path_used = "pt_patched"
+        # Pick the path explicitly. No silent retry on failure.
+        if path == "auto":
+            if self.prefill_engine is not None and self.decode_engine is not None and self.vit_engine is not None:
+                path = "trt"
+            elif self.model is not None:
+                path = "pt"
             else:
-                # 3) Both patched paths failed — try unpatched canonical PyTorch.
-                # If THAT works, our vision patches are the culprit; if not, the
-                # issue is upstream of the patches entirely (prompt/template/model).
-                if self.patches_snapshot is not None:
-                    if verbose or diagnostic:
-                        print(f"[detect] PT (patched) also 0. Trying CANONICAL (patches reverted)...")
-                    unpatched_boxes_eng, unpatched_text = self._detect_via_pt(
-                        image, prompt, max_new_tokens, generation_mode, unpatched=True,
-                    )
-                    if len(unpatched_boxes_eng) > 0:
-                        if verbose or diagnostic:
-                            print(f"[detect] CANONICAL (unpatched) returned {len(unpatched_boxes_eng)} boxes!")
-                            print(f"[detect] ⚠️  Vision patches are degrading the model.  "
-                                  f"Patched ONNX/TRT engines were built from a broken state — re-export needed.")
-                        boxes_eng, text = unpatched_boxes_eng, unpatched_text
-                        path_used = "pt_unpatched_canonical"
-                    else:
-                        if verbose or diagnostic:
-                            print(f"[detect] CANONICAL (unpatched) also 0. Issue is upstream of patches "
-                                  f"(prompt / chat template / image preprocessing / model).")
-                # Compose the diagnostic-dump text from all attempted paths
-                segments = [f"### TRT (path=trt, patched) ###\n{text}"]
-                if pt_text is not None:
-                    segments.append(f"### PyTorch (patched canonical) ###\n{pt_text}")
-                if unpatched_text is not None:
-                    segments.append(f"### PyTorch (CANONICAL, patches reverted) ###\n{unpatched_text}")
-                text = "\n\n".join(segments) + "\n"
-
-        # Boxes are already in original-image pixel space (TRT undoes letterbox,
-        # PT parses with orig_w/orig_h). No further scaling needed.
-        boxes = boxes_eng
-
-        # 4) Diagnostics — record what the PT-canonical path actually sees so we can
-        # verify against canonical inference. Native image (NO pre-resize); whatever
-        # grid_hws the processor produces is what the model saw.
-        if diagnostic or verbose:
-            try:
-                rendered_text = ""
-                token_ids = []
-                n_img_tokens_actual = 0
-                diag_grid_h, diag_grid_w = 0, 0
-                try:
-                    msg = [{"role":"user","content":[{"type":"image","image":image},
-                                                       {"type":"text","text":prompt}]}]
-                    rendered_text = self.processor.py_apply_chat_template(
-                        msg, tokenize=False, add_generation_prompt=True
-                    )
-                    imgs_d, vids_d = self.processor.process_vision_info(msg)
-                    enc_d = self.processor(text=[rendered_text], images=imgs_d, videos=vids_d, return_tensors="pt")
-                    token_ids = enc_d["input_ids"][0].tolist()
-                    n_img_tokens_actual = int(
-                        (enc_d["input_ids"] == int(self.config.image_token_index)).sum()
-                    )
-                    gh_d = enc_d.get("image_grid_hws")
-                    if gh_d is not None:
-                        gh_arr = gh_d.tolist() if hasattr(gh_d, "tolist") else gh_d
-                        diag_grid_h, diag_grid_w = int(gh_arr[0][0]), int(gh_arr[0][1])
-                except Exception as _e:
-                    rendered_text = f"<failed to render prompt: {_e}>"
-
-                (WORK / "last_inference.txt").write_text(
-                    f"# prompt:           {prompt}\n"
-                    f"# path:             {path_used}\n"
-                    f"# boxes:            {len(boxes)}\n"
-                    f"# generation_mode:  {generation_mode}\n"
-                    f"# orig_img:         {orig_w}x{orig_h}\n"
-                    f"# eng_img (TRT):    {self.eng_img_w}x{self.eng_img_h}\n"
-                    f"# diag_grid_hws:    ({diag_grid_h},{diag_grid_w})  [from processor on NATIVE image]\n"
-                    f"# eng_grid_hws:     ({self.grid_h},{self.grid_w})  [baked into TRT engine]\n"
-                    f"# image_token_idx:  {int(self.config.image_token_index)}\n"
-                    f"# image_tokens_in_input_ids: {n_img_tokens_actual}\n"
-                    f"# input_ids_len:    {len(token_ids)}\n"
-                    f"# input_ids_first_20:  {token_ids[:20]}\n"
-                    f"# input_ids_last_20:   {token_ids[-20:]}\n"
-                    f"\n=== rendered prompt (chat template applied) ===\n"
-                    f"{rendered_text}\n"
-                    f"\n=== model output ===\n{text}\n"
+                raise RuntimeError(
+                    "No inference path available: TRT engines not loaded AND PyTorch "
+                    "model is None. Call .from_pretrained(auto_export=True) or load "
+                    "engines manually."
                 )
-            except Exception:
-                pass
+        if path == "trt":
+            boxes, text = self._detect_via_trt(image, prompt, max_new_tokens, generation_mode)
+        elif path == "pt":
+            boxes, text = self._detect_via_pt(image, prompt, max_new_tokens, generation_mode)
+        else:
+            raise ValueError(f"detect(path=...) must be 'auto', 'trt', or 'pt'; got {path!r}")
+
+        # Diagnostic dump — let exceptions propagate. If the chat-template render
+        # fails, that's a real bug we want to see; do NOT substitute placeholder text.
+        if diagnostic or verbose:
+            self._write_diagnostic(image, prompt, path, boxes, text, max_new_tokens, generation_mode, orig_w, orig_h)
 
         if verbose:
             preview = text[:600].replace("\n", "  ")
-            print(f"[detect] path={path_used} boxes={len(boxes)} chars={len(text)}")
+            print(f"[detect] path={path} boxes={len(boxes)} chars={len(text)}")
             print(f"  raw: {preview}{'...' if len(text)>600 else ''}")
-        elif diagnostic and len(boxes) == 0:
-            preview = text[:400].replace("\n", "  ")
-            print(f"[detect] 0 boxes detected (path={path_used}).  Raw output ({len(text)} chars):")
-            print(f"  {preview}{'...' if len(text)>400 else ''}")
-            if "<box>" not in text:
-                print(f"[detect] No <box> tags in output. Full dump at {WORK / 'last_inference.txt'}")
-            else:
-                print(f"[detect] WARN: <box> present in raw but parse_boxes returned []. Check the regex.")
 
-        # On Colab, auto-trigger a browser download of the diagnostic dump when
-        # detection fails so the user can share it with the maintainer without
-        # having to navigate the Files panel manually.
-        if diagnostic and len(boxes) == 0:
-            self._maybe_trigger_colab_download(WORK / "last_inference.txt")
-
+        if len(boxes) == 0:
+            raise RuntimeError(
+                f"detect() returned 0 boxes on path={path}. The model produced "
+                f"{len(text)} chars; first 200: {text[:200]!r}. "
+                f"Diagnostic dump written to {WORK / 'last_inference.txt'}. "
+                f"To inspect all three runtimes side-by-side, call .diagnose() explicitly."
+            )
         return boxes, text
 
-    @staticmethod
-    def _maybe_trigger_colab_download(path) -> None:
-        """If running on Colab, trigger a browser download of `path`. No-op elsewhere."""
-        try:
-            from google.colab import files as _gfiles  # type: ignore
-        except ImportError:
-            return
-        try:
-            _gfiles.download(str(path))
-            print(f"[detect] auto-downloaded {path} to your local Downloads folder")
-        except Exception as e:
-            print(f"[detect] download trigger failed (file still at {path}): {e}")
+    def diagnose(self, image, prompt: str = "Locate all the instances that matches the following description: cats.",
+                 max_new_tokens: int = 128, generation_mode: str = "hybrid",
+                 ) -> dict:
+        """Explicit three-tier diagnostic: run TRT, PT-patched, and PT-canonical-unpatched
+        and dump all outputs side-by-side. Returns a dict with each tier's boxes/text.
+
+        This is INTENT-EXPLICIT — call it when you want to compare runtimes, not
+        as a silent fallback when detect() returns empty.
+        """
+        if isinstance(image, (str, Path)):
+            image = Image.open(image).convert("RGB")
+        orig_w, orig_h = image.size
+        prompt, _ = canonicalize_prompt(prompt)
+
+        results = {}
+        # TRT
+        if self.prefill_engine and self.decode_engine and self.vit_engine:
+            boxes, text = self._detect_via_trt(image, prompt, max_new_tokens, generation_mode)
+            results["trt"] = {"boxes": boxes, "text": text}
+        # PT patched
+        if self.model is not None:
+            boxes, text = self._detect_via_pt(image, prompt, max_new_tokens, generation_mode)
+            results["pt_patched"] = {"boxes": boxes, "text": text}
+            # PT canonical unpatched
+            if self.patches_snapshot is not None:
+                boxes, text = self._detect_via_pt(image, prompt, max_new_tokens, generation_mode, unpatched=True)
+                results["pt_canonical"] = {"boxes": boxes, "text": text}
+
+        if not results:
+            raise RuntimeError("diagnose(): no inference paths available (no TRT engines, no PT model)")
+
+        # Compose a diagnostic dump
+        segments = []
+        for name, r in results.items():
+            segments.append(f"### {name} (boxes={len(r['boxes'])}) ###\n{r['text']}")
+        combined_text = "\n\n".join(segments) + "\n"
+        # Use the path that produced the most boxes as the path_used label
+        best = max(results.items(), key=lambda kv: len(kv[1]["boxes"]))
+        self._write_diagnostic(image, prompt, f"diagnose({best[0]})", best[1]["boxes"], combined_text,
+                               max_new_tokens, generation_mode, orig_w, orig_h)
+        return results
+
+    def _write_diagnostic(self, image, prompt: str, path_used: str, boxes, text: str,
+                          max_new_tokens: int, generation_mode: str,
+                          orig_w: int, orig_h: int) -> None:
+        """Write WORK/last_inference.txt with the rendered prompt, token ids, grids,
+        and raw output. Exceptions propagate — chat-template failure is a real bug.
+        """
+        msg = [{"role":"user","content":[{"type":"image","image":image},
+                                            {"type":"text","text":prompt}]}]
+        rendered_text = self.processor.py_apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+        imgs_d, vids_d = self.processor.process_vision_info(msg)
+        enc_d = self.processor(text=[rendered_text], images=imgs_d, videos=vids_d, return_tensors="pt")
+        token_ids = enc_d["input_ids"][0].tolist()
+        n_img_tokens_actual = int((enc_d["input_ids"] == int(self.config.image_token_index)).sum())
+        gh_d = enc_d.get("image_grid_hws")
+        diag_grid_h, diag_grid_w = 0, 0
+        if gh_d is not None:
+            gh_arr = gh_d.tolist() if hasattr(gh_d, "tolist") else gh_d
+            diag_grid_h, diag_grid_w = int(gh_arr[0][0]), int(gh_arr[0][1])
+
+        (WORK / "last_inference.txt").write_text(
+            f"# prompt:           {prompt}\n"
+            f"# path:             {path_used}\n"
+            f"# boxes:            {len(boxes)}\n"
+            f"# generation_mode:  {generation_mode}\n"
+            f"# orig_img:         {orig_w}x{orig_h}\n"
+            f"# eng_img (TRT):    {self.eng_img_w}x{self.eng_img_h}\n"
+            f"# diag_grid_hws:    ({diag_grid_h},{diag_grid_w})  [from processor on NATIVE image]\n"
+            f"# eng_grid_hws:     ({self.grid_h},{self.grid_w})  [baked into TRT engine]\n"
+            f"# image_token_idx:  {int(self.config.image_token_index)}\n"
+            f"# image_tokens_in_input_ids: {n_img_tokens_actual}\n"
+            f"# input_ids_len:    {len(token_ids)}\n"
+            f"# input_ids_first_20:  {token_ids[:20]}\n"
+            f"# input_ids_last_20:   {token_ids[-20:]}\n"
+            f"\n=== rendered prompt (chat template applied) ===\n{rendered_text}\n"
+            f"\n=== model output ===\n{text}\n"
+        )
+
