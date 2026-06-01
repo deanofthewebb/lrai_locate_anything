@@ -46,35 +46,57 @@ class TestNormalizeImageGridHWS:
 
 
 class TestLockProcessorResolution:
-    """The processor's smart_resize ignores our pre-resize unless min_pixels and
-    max_pixels are locked. This was a high-impact subtle bug."""
+    """The vendored LocateAnythingImageProcessor is Kimi-VL-style, NOT Qwen2-VL.
+    Lock by raising in_token_limit (not min/max_pixels which don't exist on it).
+    """
 
-    def test_sets_min_and_max_pixels(self):
+    def _proc(self, P=14, mk=(2, 2), in_token_limit=4096):
+        class _IP:
+            patch_size = P
+            merge_kernel_size = mk
+        ip = _IP()
+        ip.in_token_limit = in_token_limit
+        class _Proc:
+            image_processor = ip
+        return _Proc()
+
+    def test_raises_in_token_limit_when_below_grid(self):
+        """If in_token_limit is below grid_h * grid_w, the lock must raise it."""
+        from lrai_locate_anything.model_loader import lock_processor_resolution
+        # grid 36x46 = 1656 tokens; default in_token_limit=1024 -> must raise to 1656
+        proc = self._proc(in_token_limit=1024)
+        lock_processor_resolution(proc, eng_img_w=46 * 14, eng_img_h=36 * 14, verbose=False)
+        assert proc.image_processor.in_token_limit == 36 * 46
+
+    def test_leaves_in_token_limit_when_already_sufficient(self):
+        from lrai_locate_anything.model_loader import lock_processor_resolution
+        proc = self._proc(in_token_limit=8192)
+        lock_processor_resolution(proc, eng_img_w=46 * 14, eng_img_h=36 * 14, verbose=False)
+        assert proc.image_processor.in_token_limit == 8192  # unchanged
+
+    def test_raises_on_non_mk_multiple_resolution(self):
+        """Engine resolutions that aren't multiples of merge_kernel_size*patch_size
+        would be silently snap-resized by the processor; lock must REFUSE."""
+        from lrai_locate_anything.model_loader import lock_processor_resolution
+        # patch_size=14, mk=(2,2) → must be multiple of 28. 504x645 fails on width.
+        proc = self._proc()
+        with pytest.raises(RuntimeError, match="not a multiple"):
+            lock_processor_resolution(proc, eng_img_w=645, eng_img_h=504, verbose=False)
+
+    def test_raises_on_pos_emb_ceiling_overflow(self):
+        from lrai_locate_anything.model_loader import lock_processor_resolution
+        # grid >=512 along either axis exceeds the processor's pos-emb ceiling
+        proc = self._proc()
+        with pytest.raises(RuntimeError, match="exceeds processor pos-emb ceiling"):
+            lock_processor_resolution(proc, eng_img_w=512 * 14, eng_img_h=28, verbose=False)
+
+    def test_warns_when_attrs_missing(self):
+        """Processor that lacks patch_size/merge_kernel_size/in_token_limit should
+        warn and return (not crash)."""
         from lrai_locate_anything.model_loader import lock_processor_resolution
 
-        class _FakeImageProc:
-            min_pixels = 1024
-            max_pixels = 200704
-
-        class _FakeProc:
-            image_processor = _FakeImageProc()
-
-        proc = _FakeProc()
-        lock_processor_resolution(proc, eng_img_w=644, eng_img_h=504, verbose=False)
-        target = 644 * 504
-        assert proc.image_processor.min_pixels == target
-        assert proc.image_processor.max_pixels == target
-
-    def test_silent_when_attrs_missing(self):
-        """If the processor doesn't have min/max_pixels, the lock should warn but
-        not crash."""
-        from lrai_locate_anything.model_loader import lock_processor_resolution
-
-        class _FakeImageProc:
-            pass  # no min_pixels / max_pixels
-
-        class _FakeProc:
-            image_processor = _FakeImageProc()
-
-        # Should not raise
-        lock_processor_resolution(_FakeProc(), 644, 504, verbose=False)
+        class _IP:
+            pass
+        class _Proc:
+            image_processor = _IP()
+        lock_processor_resolution(_Proc(), 644, 504, verbose=False)  # no raise

@@ -121,25 +121,48 @@ def normalize_image_grid_hws(inputs: dict, pixel_values_key: str = "pixel_values
 
 
 def lock_processor_resolution(processor, eng_img_w: int, eng_img_h: int, verbose: bool = True) -> None:
-    """Lock processor.image_processor's smart_resize to the engine-baked resolution.
+    """Lock the LocateAnything image processor's rescale() to be a no-op for input
+    already sized to (eng_img_w, eng_img_h).
 
-    The LocateAnything image processor (Qwen2-VL-derived) re-scales every image to fit
-    between min_pixels and max_pixels. Without locking, our pre-resize is silently
-    reverted and the engine sees images at the processor's preferred size, mismatching
-    the baked pos_emb. Setting both to the exact target makes smart_resize a no-op on
-    correctly-pre-sized input.
+    The vendored LocateAnythingImageProcessor is a Kimi-VL-style sizer, not Qwen2-VL.
+    Its rescale() does TWO transforms:
+      1) token-budget downscale (aspect-preserving) if (w/P)*(h/P) > in_token_limit
+      2) snap-resize (NOT pad) to the next multiple of merge_kernel_size * patch_size
+    To make rescale() a true no-op on a correctly pre-sized frame, we need:
+      - (eng_img_w/P) * (eng_img_h/P) <= in_token_limit         [avoids step 1]
+      - eng_img_w and eng_img_h already multiples of mk*P       [avoids step 2]
+      - eng_img_w/P < 512 and eng_img_h/P < 512                  [avoids "Exceed pos emb"]
+    There is no min_pixels/max_pixels on this processor; do not look for them.
     """
-    target = eng_img_w * eng_img_h
     ip = processor.image_processor
+    P = getattr(ip, "patch_size", None)
+    mk = getattr(ip, "merge_kernel_size", None)
+    tl = getattr(ip, "in_token_limit", None)
+    if P is None or mk is None or tl is None:
+        if verbose:
+            print(f"[loader] WARN: image_processor lacks patch_size/merge_kernel_size/in_token_limit (type={type(ip).__name__}); cannot lock")
+        return
+    mk_h, mk_w = int(mk[0]), int(mk[1])
+    grid_w = eng_img_w // P
+    grid_h = eng_img_h // P
+    if eng_img_w % (mk_w * P) != 0 or eng_img_h % (mk_h * P) != 0:
+        raise RuntimeError(
+            f"engine resolution ({eng_img_w}x{eng_img_h}) is not a multiple of "
+            f"merge_kernel_size*patch_size ({mk_w*P}x{mk_h*P}); the processor will "
+            f"snap-resize and break the baked grid_hws"
+        )
+    if grid_w >= 512 or grid_h >= 512:
+        raise RuntimeError(
+            f"engine grid ({grid_h}x{grid_w}) exceeds processor pos-emb ceiling 512"
+        )
+    needed_tl = grid_w * grid_h
     changed = []
-    for attr in ("min_pixels", "max_pixels"):
-        if hasattr(ip, attr):
-            old = getattr(ip, attr)
-            if old != target:
-                setattr(ip, attr, target)
-                changed.append(f"{attr}: {old} -> {target}")
+    if tl < needed_tl:
+        ip.in_token_limit = needed_tl
+        changed.append(f"in_token_limit: {tl} -> {needed_tl}")
     if verbose:
+        msg = (f"[loader] processor resolution lock OK "
+               f"(P={P}, mk={mk_h}x{mk_w}, grid={grid_h}x{grid_w}, in_token_limit={ip.in_token_limit})")
         if changed:
-            print(f"[loader] locked processor resolution: {'; '.join(changed)}")
-        else:
-            print(f"[loader] NOTE: processor.image_processor lacks min/max_pixels (type={type(ip).__name__})")
+            msg += f"  raised: {'; '.join(changed)}"
+        print(msg)

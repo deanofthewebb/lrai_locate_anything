@@ -154,14 +154,33 @@ class _TRTGenerator:
                     repetition_penalty=repetition_penalty,
                     generation_mode=generation_mode, keep_k=5,
                 )
-                is_empty = box_avg is None or (box_avg[0] == 0).all().item()
-                new_tokens = x0[0] if is_empty else box_avg[0]
+                # MTP failed to decode a valid box/ref pattern: box_avg is None
+                # (seq_len==1 short-circuit in sample_tokens, shouldn't happen with
+                # BLOCK>1 but defensive) or the b=0 slot is the length-1 fallback_box
+                # returned by sample_tokens when neither decode_bbox_avg nor decode_ref
+                # succeeded. Canonical recovery: take one AR step, do NOT commit MTP's
+                # raw per-position argmax (which would land in handle_pattern's ref
+                # branch as garbage).
+                if box_avg is None or box_avg[0].numel() < 6 or (box_avg[0] == 0).all().item():
+                    if generation_mode == "hybrid":
+                        use_mtp = False
+                        continue
+                    # 'fast' mode has no AR fallback; commit raw argmax as before.
+                    new_tokens = x0[0]
+                else:
+                    new_tokens = box_avg[0]
                 pat = handle_pattern(new_tokens, self.r.TID, generation_mode)
                 if pat.get("need_switch_to_ar") and generation_mode == "hybrid":
                     use_mtp = False
                     continue
                 toks = list(pat["tokens"])
                 if not toks:
+                    # handle_pattern cannot return empty tokens for any canonical input;
+                    # treat as a degenerate state and fall back to AR rather than break,
+                    # otherwise we drop the stream silently.
+                    if generation_mode == "hybrid":
+                        use_mtp = False
+                        continue
                     break
                 tnp = np.asarray(toks, dtype=np.int64)[None, :]
                 generated = np.concatenate([generated, tnp], axis=1)
@@ -391,7 +410,7 @@ class LocateAnythingRunner:
         # Force-resize to the baked engine resolution before the processor sees it.
         if self.eng_img_w is None:
             raise RuntimeError("Runner not initialised; call .export_engines() + .build_engines() + .load_engines() first")
-        img_eng = image.resize((self.eng_img_w, self.eng_img_h), Image.BILINEAR)
+        img_eng = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
 
         enc = self._processor_call(img_eng, prompt)
         # Sanity-check the processor produced the right grid.
@@ -399,8 +418,9 @@ class LocateAnythingRunner:
         if (int(gh[0, 0]), int(gh[0, 1])) != (self.grid_h, self.grid_w):
             raise RuntimeError(
                 f"processor produced grid_hws=({int(gh[0,0])},{int(gh[0,1])}) but engine baked for "
-                f"({self.grid_h},{self.grid_w}). Lock processor.image_processor.min/max_pixels to "
-                f"{self.eng_img_w*self.eng_img_h}."
+                f"({self.grid_h},{self.grid_w}). Check that eng_img_w/eng_img_h are multiples of "
+                f"merge_kernel_size*patch_size and that processor.image_processor.in_token_limit "
+                f">= {self.grid_h * self.grid_w} (see lock_processor_resolution())."
             )
 
         px_np = enc["pixel_values"].detach().cpu().numpy().astype(np.float16)
