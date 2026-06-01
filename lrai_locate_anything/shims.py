@@ -16,6 +16,25 @@ def install_transformers_shims(verbose: bool = True) -> None:
     patched before any model construction (`Qwen2Model.forward` references
     `to_legacy_cache()` mid-graph).
     """
+    import transformers
+    # transformers >=5.0 silently fails to fill embed_tokens.weight and lm_head.weight
+    # from the safetensors checkpoint for the vendored LocateAnything modeling code.
+    # The progress reports `Materializing param=...` for all 770 keys, missing_keys=[],
+    # unexpected_keys=[], no errors — but the actual values stay at random init
+    # (std == initializer_range == 0.02). All generation paths then mode-collapse
+    # on <ref>$$$$$ / <ref>"""""". 4.55–4.57 work correctly. Reproduced locally
+    # against 5.0.0 with the bare AutoModel.from_pretrained call.
+    major = int(transformers.__version__.split(".")[0])
+    if major >= 5:
+        raise RuntimeError(
+            f"transformers=={transformers.__version__} is incompatible with "
+            f"nvidia/LocateAnything-3B's vendored modeling code. "
+            f"Transformers >=5.0 silently fails to load the safetensors checkpoint "
+            f"(weights stay at random init, producing universal mode-collapse). "
+            f"Install transformers<5.0 (e.g. 4.57.6): "
+            f"`pip install \"transformers>=4.55,<5.0\"` and restart the runtime."
+        )
+
     from transformers import modeling_utils as _mu
     from transformers.cache_utils import DynamicCache as _DC
 

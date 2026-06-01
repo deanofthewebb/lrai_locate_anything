@@ -31,7 +31,11 @@ classifiers = [
 # ensure_runtime_deps().
 dependencies = [
     "torch>=2.4",
-    "transformers>=4.46,<4.60",
+    # transformers >=5.0 silently fails to fill embed_tokens.weight and
+    # lm_head.weight from the safetensors checkpoint for this vendored model
+    # (Materializing progress reports success, missing_keys=[], but the actual
+    # values stay at random init -> universal mode-collapse). 4.55-4.57 work.
+    "transformers>=4.55,<5.0",
     "huggingface_hub>=0.24,<1.0",
     "peft>=0.10,<0.13",
     "einops",
