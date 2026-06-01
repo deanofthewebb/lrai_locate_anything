@@ -81,6 +81,31 @@ class TestInstallShims:
         install_transformers_shims(verbose=False)
         assert hasattr(DynamicCache, "to_legacy_cache")
 
+    def test_to_legacy_cache_doesnt_truthiness_check_tensors(self, transformers_available):
+        """Regression: `getattr(layer, 'keys', None) or getattr(layer, 'key_cache', None)`
+        triggers a tensor truthiness check on filled cache layers. Filled tensors must
+        be returned without `bool()` being called on them.
+        """
+        import torch
+        from lrai_locate_anything.shims import install_transformers_shims
+        from transformers.cache_utils import DynamicCache
+
+        install_transformers_shims(verbose=False)
+
+        # Build a minimal cache with one filled layer
+        cache = DynamicCache()
+        k = torch.randn(1, 2, 8, 16)   # multi-element tensor — would fail bool()
+        v = torch.randn(1, 2, 8, 16)
+        cache.update(k, v, layer_idx=0)
+
+        # If the shim uses `tensor or other`, this raises
+        # "Boolean value of Tensor with more than one value is ambiguous".
+        legacy = cache.to_legacy_cache()
+        assert isinstance(legacy, tuple)
+        assert len(legacy) >= 1
+        assert torch.allclose(legacy[0][0], k)
+        assert torch.allclose(legacy[0][1], v)
+
     @pytest.mark.skipif(not _has_mark_tied_api(),
                          reason="transformers < 4.55 doesn't have mark_tied_weights_as_initialized")
     def test_mark_tied_handles_missing_attr(self, transformers_available):
