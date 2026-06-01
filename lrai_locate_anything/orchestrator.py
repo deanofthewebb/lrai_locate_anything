@@ -555,7 +555,8 @@ class LocateAnythingRunner:
         _, toks = self._gen.generate(
             px_np, ids_np,
             max_new_tokens=max_new_tokens, generation_mode=generation_mode,
-            temperature=0.0, top_p=1.0, repetition_penalty=1.1,
+            # Canonical kwargs per nvidia/LocateAnything-3B model card.
+            temperature=0.7, top_p=0.9, repetition_penalty=1.1,
         )
         text = self.tokenizer.decode(toks, skip_special_tokens=False)
         boxes_lb = parse_boxes(text, self.eng_img_w, self.eng_img_h)
@@ -594,11 +595,16 @@ class LocateAnythingRunner:
         try:
             enc = self._processor_call(image, prompt)
             with torch.inference_mode():
+                # Canonical generate kwargs per nvidia/LocateAnything-3B model-card
+                # LocateAnythingWorker.predict(): do_sample=True, temperature=0.7,
+                # top_p=0.9, repetition_penalty=1.1. Greedy (do_sample=False)
+                # causes mode-collapse in MTP/hybrid generation.
                 out = self.model.generate(
                     pixel_values=enc["pixel_values"], input_ids=enc["input_ids"],
                     attention_mask=enc["attention_mask"], image_grid_hws=enc["image_grid_hws"],
                     tokenizer=self.tokenizer, max_new_tokens=max_new_tokens, use_cache=True,
-                    generation_mode=generation_mode, do_sample=False, repetition_penalty=1.1,
+                    generation_mode=generation_mode,
+                    do_sample=True, temperature=0.7, top_p=0.9, repetition_penalty=1.1,
                     verbose=False,
                 )
             ot = out[0] if isinstance(out, tuple) else out

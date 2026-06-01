@@ -14,7 +14,11 @@ from typing import Optional
 import torch
 
 MODEL_ID = "nvidia/LocateAnything-3B"
-REF_DTYPE = torch.float16
+# bfloat16 per the canonical inference recipe on the HF model card. fp16 silently
+# overflows in Qwen2's RoPE / attention-score path on this model (max ~65504),
+# producing NaN/Inf in hidden states and <ref>$$$$$ mode-collapse at decode time.
+# bfloat16 has fp32's exponent range so there is no overflow.
+REF_DTYPE = torch.bfloat16
 
 # MoonViT structural constants (do not change unless the upstream model does)
 ENG_PATCH_SIZE = 14

@@ -140,7 +140,8 @@ def run_compare(
                     pixel_values=enc["pixel_values"], input_ids=enc["input_ids"],
                     attention_mask=enc["attention_mask"], image_grid_hws=enc["image_grid_hws"],
                     tokenizer=runner.tokenizer, max_new_tokens=128, use_cache=True,
-                    generation_mode="hybrid", do_sample=False, repetition_penalty=1.1,
+                    generation_mode="hybrid",
+                    do_sample=True, temperature=0.7, top_p=0.9, repetition_penalty=1.1,
                     verbose=False,
                 )
             ot = out[0] if isinstance(out, tuple) else out
