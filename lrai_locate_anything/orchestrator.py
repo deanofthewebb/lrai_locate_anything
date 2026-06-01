@@ -541,12 +541,43 @@ class LocateAnythingRunner:
         # 4) Diagnostics
         if diagnostic or verbose:
             try:
+                # Deeper diagnostic: include the actual rendered chat-template prompt,
+                # token-id sequence, and image-token count so we can verify prompt
+                # construction matches canonical without re-running the model.
+                rendered_text = ""
+                token_ids = []
+                n_img_tokens_actual = 0
+                try:
+                    img_eng_diag = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
+                    msg = [{"role":"user","content":[{"type":"image","image":img_eng_diag},
+                                                       {"type":"text","text":prompt}]}]
+                    rendered_text = self.processor.py_apply_chat_template(
+                        msg, tokenize=False, add_generation_prompt=True
+                    )
+                    imgs_d, vids_d = self.processor.process_vision_info(msg)
+                    enc_d = self.processor(text=[rendered_text], images=imgs_d, videos=vids_d, return_tensors="pt")
+                    token_ids = enc_d["input_ids"][0].tolist()
+                    n_img_tokens_actual = int(
+                        (enc_d["input_ids"] == int(self.config.image_token_index)).sum()
+                    )
+                except Exception as _e:
+                    rendered_text = f"<failed to render prompt: {_e}>"
+
                 (WORK / "last_inference.txt").write_text(
-                    f"# prompt: {prompt}\n"
-                    f"# path: {path_used}  boxes: {len(boxes)}\n"
-                    f"# generation_mode: {generation_mode}\n"
-                    f"# eng_img: {self.eng_img_w}x{self.eng_img_h}  grid: ({self.grid_h},{self.grid_w})\n"
-                    f"---\n{text}\n"
+                    f"# prompt:           {prompt}\n"
+                    f"# path:             {path_used}\n"
+                    f"# boxes:            {len(boxes)}\n"
+                    f"# generation_mode:  {generation_mode}\n"
+                    f"# eng_img:          {self.eng_img_w}x{self.eng_img_h}\n"
+                    f"# grid_hws:         ({self.grid_h},{self.grid_w})\n"
+                    f"# image_token_idx:  {int(self.config.image_token_index)}\n"
+                    f"# image_tokens_in_input_ids: {n_img_tokens_actual}\n"
+                    f"# input_ids_len:    {len(token_ids)}\n"
+                    f"# input_ids_first_20:  {token_ids[:20]}\n"
+                    f"# input_ids_last_20:   {token_ids[-20:]}\n"
+                    f"\n=== rendered prompt (chat template applied) ===\n"
+                    f"{rendered_text}\n"
+                    f"\n=== model output ===\n{text}\n"
                 )
             except Exception:
                 pass
