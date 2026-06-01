@@ -23,6 +23,7 @@ def build_engine(
     profile_spec: Dict[str, Tuple[tuple, tuple, tuple]],
     out_engine: Path,
     fp16: bool = True,
+    bf16: bool = False,
     workspace_gb: int = 4,
     name: str = "engine",
     logger: trt.Logger | None = None,
@@ -31,6 +32,16 @@ def build_engine(
 
     profile_spec maps input_name -> (min_shape, opt_shape, max_shape).
     Idempotent: returns the cached engine file if it exists.
+
+    Precision flags:
+      - fp16=True: allow FP16 throughout. Required for the numpy I/O boundary
+        (numpy lacks a native bf16 dtype, so the engine bindings stay FP16).
+      - bf16=True: ADDITIONALLY allow BF16 for layers that benefit (Qwen2
+        attention scores, RMSNorm). TRT picks per-layer between FP16 and BF16;
+        BF16's fp32 exponent range avoids the underflow that drove our PT
+        REF_DTYPE choice (bfloat16) and is the leading suspect for the TRT
+        decode divergence (prefill cos_sim 0.945 vs PT bf16). A100 has BF16
+        tensor cores; TRT 10.x supports BuilderFlag.BF16.
     """
     out_engine = Path(out_engine)
     if out_engine.exists():
@@ -52,13 +63,21 @@ def build_engine(
     cfg.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gb << 30)
     if fp16:
         cfg.set_flag(trt.BuilderFlag.FP16)
+    if bf16:
+        # TRT 10.x: BuilderFlag.BF16 allows BF16 compute on layers that support it.
+        if not hasattr(trt.BuilderFlag, "BF16"):
+            raise RuntimeError(
+                f"BuilderFlag.BF16 not available in tensorrt=={trt.__version__}. "
+                f"Upgrade TRT to >=10.0 for BF16 support."
+            )
+        cfg.set_flag(trt.BuilderFlag.BF16)
 
     prof = builder.create_optimization_profile()
     for n, (lo, opt, hi) in profile_spec.items():
         prof.set_shape(n, lo, opt, hi)
     cfg.add_optimization_profile(prof)
 
-    print(f"[trt] building {name} (fp16={fp16}, workspace={workspace_gb} GB) ...")
+    print(f"[trt] building {name} (fp16={fp16}, bf16={bf16}, workspace={workspace_gb} GB) ...")
     t0 = time.time()
     plan = builder.build_serialized_network(net, cfg)
     if plan is None:
@@ -145,16 +164,28 @@ def build_llm(prefill_onnx: Path, decode_onnx: Path,
         "position_ids":    ((1, s_min), (1, s_opt), (1, s_max)),
         "attention_mask":  ((1, s_min), (1, s_opt), (1, s_max)),
     }
+    # Enable BF16 alongside FP16 for the LLM engines. Qwen2 attention scores
+    # and RMSNorm are precision-sensitive — TRT picks BF16 for those layers,
+    # FP16 for the rest (and FP16 at the numpy I/O boundary). This is the
+    # remaining precision-drift fix after the dual-engine routing fix.
+    # Pop from kw so the caller can override per-call without TypeError on
+    # multiple values for keyword argument.
+    llm_fp16 = kw.pop("fp16", True)
+    llm_bf16 = kw.pop("bf16", True)
+
     pre = build_engine(prefill_onnx, pref_prof, prefill_engine,
-                       workspace_gb=workspace_gb, name="llm_prefill", **kw)
+                       workspace_gb=workspace_gb, name="llm_prefill",
+                       fp16=llm_fp16, bf16=llm_bf16, **kw)
 
     dec_prof = _decode_profile(n_layers, n_kv_heads, head_dim, p_min, p_opt, p_max)
     dec = build_engine(decode_onnx, dec_prof, decode_engine,
-                       workspace_gb=workspace_gb, name="llm_decode_mtp", **kw)
+                       workspace_gb=workspace_gb, name="llm_decode_mtp",
+                       fp16=llm_fp16, bf16=llm_bf16, **kw)
 
     dec_ar = None
     if decode_ar_onnx is not None and decode_ar_engine is not None:
         dec_ar = build_engine(decode_ar_onnx, dec_prof, decode_ar_engine,
-                              workspace_gb=workspace_gb, name="llm_decode_ar", **kw)
+                              workspace_gb=workspace_gb, name="llm_decode_ar",
+                              fp16=llm_fp16, bf16=llm_bf16, **kw)
 
     return pre, dec, dec_ar

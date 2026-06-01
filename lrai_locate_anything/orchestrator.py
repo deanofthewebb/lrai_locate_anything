@@ -473,8 +473,15 @@ class LocateAnythingRunner:
             runner._write_artifacts_fingerprint(current_fp)
         return runner
 
+    # Bump this whenever the engine build pipeline changes in a way that
+    # invalidates pre-existing engines (dtype flags, profile shapes, ONNX
+    # graph topology, etc.). Combined with the model-state hash to form the
+    # full fingerprint, so engines built with old flags get wiped on next
+    # auto_export even when the model weights haven't changed.
+    _ENGINE_BUILD_VERSION = "v2:bf16-llm+dual-decode"
+
     def _model_fingerprint(self) -> str:
-        """Stable hash of the in-memory model state that the engines depend on.
+        """Stable hash of the in-memory model state PLUS the engine build version.
 
         We hash:
           - embed_tokens.weight (changes on every load if loading is broken,
@@ -483,6 +490,7 @@ class LocateAnythingRunner:
           - lm_head.weight       (same; tied or not, its values matter)
           - mlp1 projector weights (vision-to-LM bridge)
           - vision_model.patch_embed conv weight (entry point of vision tower)
+          - _ENGINE_BUILD_VERSION (forces invalidation when build pipeline changes)
         We do NOT hash every param (too expensive); these are the 4 layers
         whose values would change between a broken random-init load and a
         good trained load. SHA1 over the first 1024 bytes of each tensor's
@@ -501,6 +509,7 @@ class LocateAnythingRunner:
             # First 1024 bytes via CPU float view (bf16 has no numpy dtype)
             view = t.detach().float().cpu().flatten()[:512].contiguous().numpy().tobytes()
             h.update(view)
+        h.update(f"|build={self._ENGINE_BUILD_VERSION}".encode())
         return h.hexdigest()
 
     def _cached_artifacts_fingerprint(self) -> Optional[str]:
