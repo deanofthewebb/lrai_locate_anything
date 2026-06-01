@@ -809,10 +809,32 @@ class LocateAnythingRunner:
         else:
             raise ValueError(f"detect(path=...) must be 'auto', 'trt', or 'pt'; got {path!r}")
 
-        # Diagnostic dump — let exceptions propagate. If the chat-template render
-        # fails, that's a real bug we want to see; do NOT substitute placeholder text.
+        # When in diagnostic mode AND the primary path returned 0 boxes, ALSO run
+        # the other path so the dump shows both outputs side-by-side AND we can
+        # capture layer-by-layer numerical diffs (vision/projector/prefill logits).
+        # This is NOT a silent fallback — we still raise on failure; this just
+        # populates the diagnostic file with comparison data.
+        comparison_out = None
+        layer_diag_text = ""
+        if diagnostic and len(boxes) == 0:
+            other = "pt" if path == "trt" else "trt"
+            try:
+                if other == "pt" and self.model is not None:
+                    cmp_boxes, cmp_text = self._detect_via_pt(image, prompt, max_new_tokens, generation_mode)
+                    comparison_out = (other, cmp_boxes, cmp_text, None)
+                elif other == "trt" and self.vit_engine and self.proj_engine and self.prefill_engine and self.decode_engine:
+                    cmp_boxes, cmp_text = self._detect_via_trt(image, prompt, max_new_tokens, generation_mode)
+                    comparison_out = (other, cmp_boxes, cmp_text, None)
+            except Exception as _e:
+                comparison_out = (other, [], "", repr(_e))
+            try:
+                layer_diag_text = self._layer_diagnostic(image, prompt)
+            except Exception as _e:
+                layer_diag_text = f"<layer diagnostic failed: {_e!r}>"
+
         if diagnostic or verbose:
-            self._write_diagnostic(image, prompt, path, boxes, text, max_new_tokens, generation_mode, orig_w, orig_h)
+            self._write_diagnostic(image, prompt, path, boxes, text, max_new_tokens, generation_mode,
+                                     orig_w, orig_h, comparison=comparison_out, layer_diag=layer_diag_text)
 
         if verbose:
             preview = text[:600].replace("\n", "  ")
@@ -820,13 +842,139 @@ class LocateAnythingRunner:
             print(f"  raw: {preview}{'...' if len(text)>600 else ''}")
 
         if len(boxes) == 0:
+            cmp_msg = ""
+            if comparison_out is not None:
+                _op, _ob, _ot, _oe = comparison_out
+                if _oe is None:
+                    cmp_msg = f" Compared {_op} path: {len(_ob)} boxes; first 200: {_ot[:200]!r}."
+                else:
+                    cmp_msg = f" Compared {_op} path raised: {_oe}."
             raise RuntimeError(
                 f"detect() returned 0 boxes on path={path}. The model produced "
-                f"{len(text)} chars; first 200: {text[:200]!r}. "
-                f"Diagnostic dump written to {WORK / 'last_inference.txt'}. "
-                f"To inspect all three runtimes side-by-side, call .diagnose() explicitly."
+                f"{len(text)} chars; first 200: {text[:200]!r}.{cmp_msg} "
+                f"Diagnostic dump written to {WORK / 'last_inference.txt'}."
             )
         return boxes, text
+
+    def _layer_diagnostic(self, image, prompt: str) -> str:
+        """Run vision encoder, projector, and prefill through both TRT and PT, and
+        report shape/mean/std/min/max/NaN + max-abs-diff + cosine-similarity between
+        the two implementations at each layer. Pinpoints which stage diverges.
+
+        Returns a string ready to embed in last_inference.txt.
+        """
+        if self.model is None:
+            return "# layer diagnostic SKIPPED (PT model not loaded)\n"
+        if not (self.vit_engine and self.proj_engine and self.prefill_engine):
+            return "# layer diagnostic SKIPPED (TRT engines not loaded)\n"
+
+        lines = ["", "=" * 60, "LAYER DIAGNOSTIC (TRT vs PT, numerical)", "=" * 60]
+
+        def _stats(name: str, t: torch.Tensor) -> str:
+            t = t.detach().float().cpu()
+            has_nan = bool(torch.isnan(t).any())
+            has_inf = bool(torch.isinf(t).any())
+            return (f"{name:18s}  shape={tuple(t.shape)}  "
+                    f"mean={t.mean().item():+.5f}  std={t.std().item():.5f}  "
+                    f"min={t.min().item():+.4f}  max={t.max().item():+.4f}  "
+                    f"NaN={has_nan} Inf={has_inf}")
+
+        def _compare(name: str, a: torch.Tensor, b: torch.Tensor) -> str:
+            a = a.detach().float().cpu().flatten()
+            b = b.detach().float().cpu().flatten()
+            n = min(a.numel(), b.numel())
+            a, b = a[:n], b[:n]
+            diff = (a - b).abs()
+            cos = float(torch.nn.functional.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item())
+            return (f"{name:18s}  max|TRT-PT|={diff.max().item():.5f}  "
+                    f"mean|diff|={diff.mean().item():.5f}  "
+                    f"cos_sim={cos:.6f}")
+
+        # Set up inputs identical for both paths via letterbox->processor
+        img_lb, _, _, _ = _letterbox(image, self.eng_img_w, self.eng_img_h)
+        enc = self._processor_call(img_lb, prompt)
+        pixel_values = enc["pixel_values"]
+        grid_hws = enc["image_grid_hws"]
+        input_ids = enc["input_ids"]
+        attn_mask = enc["attention_mask"]
+
+        # ---------------- VISION ----------------
+        px_np = pixel_values.detach().float().cpu().numpy().astype(np.float16)
+        with torch.inference_mode():
+            pt_vit_out = self.model.vision_model(
+                pixel_values=pixel_values.to(self.model.dtype), grid_hws=grid_hws,
+            )
+        # pt_vit_out may be a tensor or a tuple/list depending on the vendored module
+        if hasattr(pt_vit_out, "last_hidden_state"):
+            pt_vit_t = pt_vit_out.last_hidden_state
+        elif isinstance(pt_vit_out, (list, tuple)):
+            pt_vit_t = torch.cat([t for t in pt_vit_out], dim=0) if isinstance(pt_vit_out[0], torch.Tensor) else torch.as_tensor(pt_vit_out)
+        else:
+            pt_vit_t = pt_vit_out
+        # TRT vision (engine + python merger applied inside _vision)
+        trt_vit_np = self._gen._vision(px_np)  # (L_post, D)
+        trt_vit_t = torch.from_numpy(trt_vit_np.astype(np.float32))
+        # PT post-merger to match TRT's L_post
+        gh_np = np.array([[self.grid_h, self.grid_w]], dtype=np.int32)
+        pt_vit_merged = python_patch_merger(pt_vit_t.detach().float().cpu().numpy(), gh_np, kh=2, kw=2)
+        pt_vit_merged_t = torch.from_numpy(pt_vit_merged.astype(np.float32))
+        lines.append("")
+        lines.append("[vision encoder output, post-2x2 merger]")
+        lines.append(_stats("TRT vit+merger",   trt_vit_t))
+        lines.append(_stats("PT  vit+merger",   pt_vit_merged_t))
+        lines.append(_compare("vit diff",         trt_vit_t, pt_vit_merged_t))
+
+        # ---------------- PROJECTOR ----------------
+        trt_proj_np = self._gen._project(trt_vit_np)  # uses TRT proj_engine on TRT vit
+        trt_proj_t = torch.from_numpy(trt_proj_np.astype(np.float32))
+        with torch.inference_mode():
+            pt_proj_t = self.model.mlp1(pt_vit_merged_t.to(self.model.dtype).to(self.model.device))
+        lines.append("")
+        lines.append("[projector output (visual features fed to LM)]")
+        lines.append(_stats("TRT proj",  trt_proj_t))
+        lines.append(_stats("PT  mlp1",  pt_proj_t))
+        lines.append(_compare("proj diff", trt_proj_t, pt_proj_t))
+
+        # ---------------- PREFILL (logits at last position) ----------------
+        n_img_in_ids = int((input_ids == int(self.config.image_token_index)).sum())
+        ids_np = input_ids.detach().cpu().numpy().astype(np.int64)
+        pos_np = np.arange(ids_np.shape[1], dtype=np.int64)[None, :]
+        att_np = np.ones_like(ids_np, dtype=np.int64)
+        trt_logits, _trt_past = self._gen._prefill_trt(ids_np, trt_proj_np[:n_img_in_ids], pos_np, att_np)
+        trt_logits_t = torch.from_numpy(trt_logits.astype(np.float32))  # (1, S, V)
+        trt_last_logits = trt_logits_t[0, -1]  # (V,)
+
+        # PT prefill via the same scatter pathway. Use the canonical extract_feature
+        # bypass — we have visual features already as `pt_proj_t`.
+        with torch.inference_mode():
+            o = self.model.language_model.model(
+                input_ids=input_ids.to(self.model.device),
+                visual_features=pt_proj_t.to(self.model.dtype).to(self.model.device),
+                image_token_index=int(self.config.image_token_index),
+                position_ids=torch.from_numpy(pos_np).to(self.model.device),
+                attention_mask=attn_mask.to(self.model.device),
+                use_cache=True, return_dict=True,
+            )
+            pt_logits = self.model.language_model.lm_head(o.last_hidden_state).float()  # (1, S, V)
+        pt_last_logits = pt_logits[0, -1].detach().cpu()
+
+        lines.append("")
+        lines.append("[prefill logits at LAST input position (predicting first output token)]")
+        lines.append(_stats("TRT last_logits", trt_last_logits))
+        lines.append(_stats("PT  last_logits", pt_last_logits))
+        lines.append(_compare("logits diff",   trt_last_logits, pt_last_logits))
+
+        # Top-5 from each
+        def _top5(t: torch.Tensor, label: str) -> str:
+            probs = torch.softmax(t.float(), dim=-1)
+            top_p, top_i = probs.topk(5)
+            decoded = [self.tokenizer.decode([int(i)], skip_special_tokens=False) for i in top_i.tolist()]
+            pairs = ", ".join(f"{tid}={prob:.3f}({tok!r})" for tid, prob, tok in zip(top_i.tolist(), top_p.tolist(), decoded))
+            return f"{label}: {pairs}"
+        lines.append(_top5(trt_last_logits, "TRT top5"))
+        lines.append(_top5(pt_last_logits,  "PT  top5"))
+
+        return "\n".join(lines) + "\n"
 
     def diagnose(self, image, prompt: str = "Locate all the instances that matches the following description: cats.",
                  max_new_tokens: int = 128, generation_mode: str = "hybrid",
@@ -872,9 +1020,16 @@ class LocateAnythingRunner:
 
     def _write_diagnostic(self, image, prompt: str, path_used: str, boxes, text: str,
                           max_new_tokens: int, generation_mode: str,
-                          orig_w: int, orig_h: int) -> None:
+                          orig_w: int, orig_h: int,
+                          comparison: Optional[tuple] = None,
+                          layer_diag: str = "") -> None:
         """Write WORK/last_inference.txt with the rendered prompt, token ids, grids,
         and raw output. Exceptions propagate — chat-template failure is a real bug.
+
+        comparison: optional (other_path_name, other_boxes, other_text, error_str_or_None)
+                    captured by detect() when primary path failed.
+        layer_diag: optional string with per-layer TRT-vs-PT numerical comparison
+                    (from _layer_diagnostic). Empty when not applicable.
         """
         msg = [{"role":"user","content":[{"type":"image","image":image},
                                             {"type":"text","text":prompt}]}]
@@ -889,21 +1044,100 @@ class LocateAnythingRunner:
             gh_arr = gh_d.tolist() if hasattr(gh_d, "tolist") else gh_d
             diag_grid_h, diag_grid_w = int(gh_arr[0][0]), int(gh_arr[0][1])
 
-        (WORK / "last_inference.txt").write_text(
-            f"# prompt:           {prompt}\n"
-            f"# path:             {path_used}\n"
-            f"# boxes:            {len(boxes)}\n"
-            f"# generation_mode:  {generation_mode}\n"
-            f"# orig_img:         {orig_w}x{orig_h}\n"
-            f"# eng_img (TRT):    {self.eng_img_w}x{self.eng_img_h}\n"
-            f"# diag_grid_hws:    ({diag_grid_h},{diag_grid_w})  [from processor on NATIVE image]\n"
-            f"# eng_grid_hws:     ({self.grid_h},{self.grid_w})  [baked into TRT engine]\n"
-            f"# image_token_idx:  {int(self.config.image_token_index)}\n"
-            f"# image_tokens_in_input_ids: {n_img_tokens_actual}\n"
-            f"# input_ids_len:    {len(token_ids)}\n"
-            f"# input_ids_first_20:  {token_ids[:20]}\n"
-            f"# input_ids_last_20:   {token_ids[-20:]}\n"
-            f"\n=== rendered prompt (chat template applied) ===\n{rendered_text}\n"
-            f"\n=== model output ===\n{text}\n"
-        )
+        # Environment context — important for cross-machine debugging
+        import transformers, sys
+        try:
+            import torch as _torch
+            torch_v = _torch.__version__
+            cuda_avail = _torch.cuda.is_available()
+            cuda_dev = _torch.cuda.get_device_name(0) if cuda_avail else "n/a"
+            cuda_v = _torch.version.cuda if cuda_avail else "n/a"
+        except Exception:
+            torch_v = cuda_dev = cuda_v = "?"
+            cuda_avail = False
+        try:
+            _import = __import__
+            _trt_v = _import("tensorrt").__version__
+        except Exception:
+            _trt_v = "n/a"
+        # PT weight sanity (tied? real values? — re-stat at write time)
+        try:
+            e = self.model.language_model.model.embed_tokens.weight
+            h = self.model.language_model.lm_head.weight
+            embed_std = e.std().item(); head_std = h.std().item()
+            embed_mean = e.mean().item(); head_mean = h.mean().item()
+            tied = (e.data_ptr() == h.data_ptr())
+        except Exception:
+            embed_std = head_std = embed_mean = head_mean = float("nan")
+            tied = False
+        # Engine fingerprint stamp
+        try:
+            fp_path = TRT_DIR / ".model_fingerprint"
+            stamped_fp = fp_path.read_text().strip() if fp_path.exists() else "<no stamp>"
+        except Exception:
+            stamped_fp = "<read failed>"
+        try:
+            current_fp = self._model_fingerprint()
+        except Exception:
+            current_fp = "<compute failed>"
+
+        sections = [
+            f"# prompt:           {prompt}",
+            f"# path:             {path_used}",
+            f"# boxes:            {len(boxes)}",
+            f"# generation_mode:  {generation_mode}",
+            f"# orig_img:         {orig_w}x{orig_h}",
+            f"# eng_img (TRT):    {self.eng_img_w}x{self.eng_img_h}",
+            f"# diag_grid_hws:    ({diag_grid_h},{diag_grid_w})  [from processor on NATIVE image]",
+            f"# eng_grid_hws:     ({self.grid_h},{self.grid_w})  [baked into TRT engine]",
+            f"# image_token_idx:  {int(self.config.image_token_index)}",
+            f"# image_tokens_in_input_ids: {n_img_tokens_actual}",
+            f"# input_ids_len:    {len(token_ids)}",
+            f"# input_ids_first_20:  {token_ids[:20]}",
+            f"# input_ids_last_20:   {token_ids[-20:]}",
+            f"",
+            f"# === environment ===",
+            f"# python:           {sys.version.split()[0]}",
+            f"# torch:            {torch_v}  cuda_avail={cuda_avail}  cuda_v={cuda_v}  device={cuda_dev}",
+            f"# transformers:     {transformers.__version__}",
+            f"# tensorrt:         {_trt_v}",
+            f"# REF_DTYPE:        {REF_DTYPE}",
+            f"# model.dtype:      {next(self.model.parameters()).dtype if self.model is not None else 'n/a'}",
+            f"",
+            f"# === pt weights sanity (in-memory, AT DUMP TIME) ===",
+            f"# embed: mean={embed_mean:+.5f} std={embed_std:.5f}   (trained ~0.024, random init ~0.020)",
+            f"# head:  mean={head_mean:+.5f} std={head_std:.5f}",
+            f"# tied (data_ptr equality): {tied}",
+            f"",
+            f"# === engine fingerprint stamp ===",
+            f"# stamped on disk:  {stamped_fp}",
+            f"# current model:    {current_fp}",
+            f"# match? {stamped_fp == current_fp}",
+        ]
+
+        # Comparison output (the OTHER path) if detect() ran one on a 0-box failure
+        if comparison is not None:
+            other_path, other_boxes, other_text, other_err = comparison
+            sections.append("")
+            sections.append(f"# === comparison: ran {other_path} path on the same input ===")
+            if other_err is not None:
+                sections.append(f"# {other_path} raised: {other_err}")
+            else:
+                sections.append(f"# {other_path} boxes: {len(other_boxes)}")
+                sections.append(f"# {other_path} text ({len(other_text)} chars; first 600):")
+                # Embed the comparison text below for the user to inspect
+                sections.append("")
+                sections.append(f"=== {other_path} model output ===")
+                sections.append(other_text)
+
+        sections.append("")
+        sections.append(layer_diag if layer_diag else "")
+        sections.append(f"=== rendered prompt (chat template applied) ===")
+        sections.append(rendered_text)
+        sections.append("")
+        sections.append(f"=== {path_used} model output ===")
+        sections.append(text)
+        sections.append("")
+
+        (WORK / "last_inference.txt").write_text("\n".join(sections))
 
