@@ -443,6 +443,24 @@ class LocateAnythingRunner:
         print(f"[runner] baking engines for grid_hws=({self.grid_h},{self.grid_w})  "
               f"L_pre={self.grid_h*self.grid_w}  L_post={n_img_tokens}")
 
+        # Sanity check the LM weights BEFORE we trace them into ONNX. If we
+        # bake random-init weights into the engine, every TRT inference will
+        # mode-collapse forever — and you can't tell from the engine file alone.
+        # This guard ensures ONNX/TRT inherit only the real trained weights.
+        # Trained Qwen2.5-3B embed_tokens has std ~0.024; Qwen2 random init
+        # uses initializer_range=0.02. The gap is ~20% so the threshold is safe.
+        embed_std = self.model.language_model.model.embed_tokens.weight.std().item()
+        if embed_std < 0.022:
+            raise RuntimeError(
+                f"export_engines refusing to run: embed_tokens.weight.std()={embed_std:.5f} "
+                f"is too close to Qwen2's initializer_range (0.020). The model is at "
+                f"random init — exporting now would bake garbage into the ONNX/TRT "
+                f"engines. Most likely cause: transformers>=5.0 silently failed to load "
+                f"the checkpoint. Verify with:\n"
+                f"  import transformers; print(transformers.__version__)\n"
+                f"and ensure transformers<5.0 (e.g. 4.57.6)."
+            )
+
         vit_h = self.config.vision_config.hidden_size
         vit_feat_dim = vit_h * 4
 
