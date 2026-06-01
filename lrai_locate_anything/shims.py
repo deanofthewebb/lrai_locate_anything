@@ -74,8 +74,15 @@ def install_transformers_shims(verbose: bool = True) -> None:
             legacy = ()
             if hasattr(self, "layers") and self.layers:
                 for layer in self.layers:
-                    k = getattr(layer, "keys", None) or getattr(layer, "key_cache", None)
-                    v = getattr(layer, "values", None) or getattr(layer, "value_cache", None)
+                    # Explicit `is None` checks (NOT `a or b`) — `tensor or other_tensor`
+                    # triggers a truthiness check, which raises "Boolean value of Tensor
+                    # with more than one value is ambiguous" on filled cache layers.
+                    k = getattr(layer, "keys", None)
+                    if k is None:
+                        k = getattr(layer, "key_cache", None)
+                    v = getattr(layer, "values", None)
+                    if v is None:
+                        v = getattr(layer, "value_cache", None)
                     if k is not None and v is not None:
                         legacy += ((k, v),)
             elif hasattr(self, "key_cache") and hasattr(self, "value_cache"):
