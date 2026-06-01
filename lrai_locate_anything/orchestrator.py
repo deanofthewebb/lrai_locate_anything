@@ -259,12 +259,27 @@ class _TRTGenerator:
                 tnp = np.asarray(toks, dtype=np.int64)[None, :]
                 generated = np.concatenate([generated, tnp], axis=1)
                 out_tokens.extend(toks)
-                k = tnp.shape[1]
-                past = [nxt[2 * i][:, :, :P + k, :] for i in range(self.r.n_layers)] + \
-                       [nxt[2 * i + 1][:, :, :P + k, :] for i in range(self.r.n_layers)]
-                past = [t for pair in zip(past[:self.r.n_layers], past[self.r.n_layers:]) for t in pair]
+                # CRITICAL: discard ALL MTP-block kv entries (computed under MASK
+                # token inputs) and rebuild kv for the committed tokens via a
+                # short AR forward pass through the decode engine. Without this,
+                # subsequent iterations attend to mask-poisoned kv states and
+                # produce multilingual garbage.
+                #
+                # Canonical (modeling_locateanything.py:_sample_token_in_mtp -> line
+                # 484): `past_key_values = kv[:, :, :generated.shape[1], :]`
+                # which truncates past_key_values back to the PRE-MTP length, then
+                # the next iteration's prepare_inputs_for_generation feeds the
+                # newly-committed tokens through the model to recompute their kv.
+                # We replicate that here by truncating to P (pre-MTP) and re-doing
+                # an AR forward over `toks` to populate kv at positions [P, P+k).
+                past = [t[:, :, :P, :] for t in nxt]  # truncate to pre-MTP
                 if pat.get("is_terminal") or int(self.r.TID["im_end_token_id"]) in toks:
                     break
+                # Re-run committed tokens through decode engine to refill kv with
+                # the correct (non-mask) attention states.
+                rebuild_pos = np.arange(P, P + len(toks), dtype=np.int64)[None, :]
+                rebuild_att = np.ones((1, P + len(toks)), dtype=np.int64)
+                _, past = self._decode(tnp, rebuild_pos, rebuild_att, past)
             else:
                 last_id = generated[:, -1:]
                 pos = np.array([[P]], dtype=np.int64)
