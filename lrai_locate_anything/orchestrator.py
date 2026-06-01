@@ -376,21 +376,76 @@ class LocateAnythingRunner:
         runner = cls(model, tokenizer, processor, config, local, patches_snapshot=snap)
         rescued = bool(getattr(model, "_locany_lm_head_was_rescued", False))
         if auto_export:
-            if force_reexport or rescued:
-                runner._wipe_stale_artifacts(reason=("force_reexport" if force_reexport else "lm_head rescued"))
+            current_fp = runner._model_fingerprint()
+            stale_fp = runner._cached_artifacts_fingerprint()
+            mismatched = (stale_fp is not None and stale_fp != current_fp)
+            reasons = []
+            if force_reexport: reasons.append("force_reexport")
+            if rescued:        reasons.append("lm_head rescued")
+            if mismatched:     reasons.append(f"fingerprint mismatch (cached={stale_fp[:12]} current={current_fp[:12]})")
+            if reasons:
+                runner._wipe_stale_artifacts(reason="; ".join(reasons))
             runner.export_engines(sample_image=sample_image, sample_prompt=sample_prompt)
             runner.build_engines()
             runner.load_engines()
+            runner._write_artifacts_fingerprint(current_fp)
         return runner
+
+    def _model_fingerprint(self) -> str:
+        """Stable hash of the in-memory model state that the engines depend on.
+
+        We hash:
+          - embed_tokens.weight (changes on every load if loading is broken,
+            and is the most important signal — random init has std=0.02,
+            trained has std=0.024)
+          - lm_head.weight       (same; tied or not, its values matter)
+          - mlp1 projector weights (vision-to-LM bridge)
+          - vision_model.patch_embed conv weight (entry point of vision tower)
+        We do NOT hash every param (too expensive); these are the 4 layers
+        whose values would change between a broken random-init load and a
+        good trained load. SHA1 over the first 1024 bytes of each tensor's
+        raw bytes is enough to discriminate; full hash would be wasteful.
+        """
+        import hashlib
+        h = hashlib.sha1()
+        tensors_to_hash = [
+            ("embed_tokens", self.model.language_model.model.embed_tokens.weight),
+            ("lm_head",      self.model.language_model.lm_head.weight),
+            ("mlp1",         next(self.model.mlp1.parameters())),
+            ("vit_patch",    self.model.vision_model.patch_embed.proj.weight),
+        ]
+        for name, t in tensors_to_hash:
+            h.update(name.encode())
+            # First 1024 bytes via CPU float view (bf16 has no numpy dtype)
+            view = t.detach().float().cpu().flatten()[:512].contiguous().numpy().tobytes()
+            h.update(view)
+        return h.hexdigest()
+
+    def _cached_artifacts_fingerprint(self) -> Optional[str]:
+        """Read the fingerprint stamp written next to the engine artifacts on
+        a prior successful export. Returns None if no stamp exists."""
+        fp_path = TRT_DIR / ".model_fingerprint"
+        if fp_path.exists():
+            try:
+                return fp_path.read_text().strip()
+            except Exception:
+                return None
+        return None
+
+    def _write_artifacts_fingerprint(self, fingerprint: str) -> None:
+        """Stamp the current model fingerprint next to the engines so the next
+        session can detect if the cached artifacts came from a different model state."""
+        TRT_DIR.mkdir(parents=True, exist_ok=True)
+        (TRT_DIR / ".model_fingerprint").write_text(fingerprint)
 
     def _wipe_stale_artifacts(self, reason: str = "") -> None:
         """Remove cached ONNX + TRT artifacts. Used when the model state has changed
         in a way that invalidates anything baked from a prior session.
         """
-        import shutil
         for d in (ONNX_DIR, TRT_DIR):
             if d.exists():
-                items = [p for p in d.iterdir() if p.is_file()]
+                # Wipe files AND the fingerprint stamp
+                items = [p for p in d.iterdir() if p.is_file() or p.name.startswith(".")]
                 if items:
                     print(f"[runner] wiping {len(items)} stale artifact(s) in {d} ({reason})")
                     for p in items:
