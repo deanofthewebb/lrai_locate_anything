@@ -21,6 +21,34 @@ from .parse import parse_boxes, python_patch_merger
 
 
 # ---------------------------------------------------------------------------
+# Letterbox (aspect-preserving resize + pad) for the fixed-shape TRT engine.
+# NOTE: a naive BICUBIC-stretch to (eng_w, eng_h) distorts aspect ratio and
+# produces visual features MoonViT cannot interpret — the LM degenerates into
+# the <ref>$$$$$ / <ref>""""" mode-collapse loop on ALL generation paths.
+# Letterbox preserves aspect ratio at the cost of gray pad bars (which the
+# vision tower handles fine — they are a small constant region).
+# ---------------------------------------------------------------------------
+def _letterbox(img: Image.Image, target_w: int, target_h: int,
+               color: Tuple[int, int, int] = (128, 128, 128)
+               ) -> Tuple[Image.Image, float, int, int]:
+    """Aspect-preserving resize + center-pad to exactly (target_w, target_h).
+
+    Returns (letterboxed_image, scale, pad_x, pad_y) where
+        original_x = (letterbox_x - pad_x) / scale
+        original_y = (letterbox_y - pad_y) / scale
+    """
+    orig_w, orig_h = img.size
+    scale = min(target_w / orig_w, target_h / orig_h)
+    new_w, new_h = max(1, int(round(orig_w * scale))), max(1, int(round(orig_h * scale)))
+    resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+    canvas = Image.new("RGB", (target_w, target_h), color)
+    pad_x = (target_w - new_w) // 2
+    pad_y = (target_h - new_h) // 2
+    canvas.paste(resized, (pad_x, pad_y))
+    return canvas, scale, pad_x, pad_y
+
+
+# ---------------------------------------------------------------------------
 # Prompt auto-canonicalization
 # ---------------------------------------------------------------------------
 _CANONICAL_PREFIX = "Locate all the instances that matches the following description: "
@@ -447,10 +475,17 @@ class LocateAnythingRunner:
     def _detect_via_trt(self, image: Image.Image, prompt: str,
                          max_new_tokens: int, generation_mode: str) -> Tuple[List, str]:
         """TRT path: vision→projector engines, then LLM via prefill+decode engines (or
-        PyTorch LM fallback when LLM engines absent)."""
+        PyTorch LM fallback when LLM engines absent).
+
+        The TRT vision engine has a fixed input shape baked at export time, so we
+        cannot hand it a native-resolution PIL. We letterbox (aspect-preserving
+        resize + center-pad) to the engine resolution, then undo the letterbox
+        transform on the box coordinates so callers see boxes in ORIGINAL image
+        pixel space. Returns boxes in original-image coords (NOT engine coords).
+        """
         if self.eng_img_w is None:
             raise RuntimeError("Runner not initialised; call .export_engines() + .build_engines() + .load_engines() first")
-        img_eng = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
+        img_eng, scale, pad_x, pad_y = _letterbox(image, self.eng_img_w, self.eng_img_h)
         enc = self._processor_call(img_eng, prompt)
         gh = enc["image_grid_hws"]
         if (int(gh[0, 0]), int(gh[0, 1])) != (self.grid_h, self.grid_w):
@@ -468,7 +503,14 @@ class LocateAnythingRunner:
             temperature=0.0, top_p=1.0, repetition_penalty=1.1,
         )
         text = self.tokenizer.decode(toks, skip_special_tokens=False)
-        return parse_boxes(text, self.eng_img_w, self.eng_img_h), text
+        boxes_lb = parse_boxes(text, self.eng_img_w, self.eng_img_h)
+        # Undo letterbox: letterbox_xy -> orig_xy
+        boxes_orig = [
+            ((x1 - pad_x) / scale, (y1 - pad_y) / scale,
+             (x2 - pad_x) / scale, (y2 - pad_y) / scale)
+            for (x1, y1, x2, y2) in boxes_lb
+        ]
+        return boxes_orig, text
 
     def _detect_via_pt(self, image: Image.Image, prompt: str,
                         max_new_tokens: int, generation_mode: str = "hybrid",
@@ -480,6 +522,10 @@ class LocateAnythingRunner:
         with the ORIGINAL canonical vision functions. Used as the 3rd-tier fallback
         when both patched-TRT and patched-PT produce degenerate output, to isolate
         whether the patches are responsible.
+
+        Unlike the TRT path, `model.generate()` is fully dynamic — we hand the
+        native-resolution PIL straight to the processor and let it decide the grid.
+        Returns boxes in ORIGINAL image pixel space.
         """
         if self.model is None:
             return [], ""
@@ -488,8 +534,7 @@ class LocateAnythingRunner:
         if unpatched and self.patches_snapshot is not None:
             restore_vision_patches(self.model, self.patches_snapshot)
         try:
-            img_eng = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
-            enc = self._processor_call(img_eng, prompt)
+            enc = self._processor_call(image, prompt)
             with torch.inference_mode():
                 out = self.model.generate(
                     pixel_values=enc["pixel_values"], input_ids=enc["input_ids"],
@@ -508,7 +553,8 @@ class LocateAnythingRunner:
             if unpatched and self.patches_snapshot is not None:
                 new_snap = apply_vision_patches(self.model, verbose=False)
                 self.patches_snapshot = new_snap
-        return parse_boxes(text, self.eng_img_w, self.eng_img_h), text
+        orig_w, orig_h = image.size
+        return parse_boxes(text, orig_w, orig_h), text
 
     def detect(self, image, prompt: str = "Locate all the instances that matches the following description: object.",
                max_new_tokens: int = 128, generation_mode: str = "hybrid",
@@ -593,22 +639,21 @@ class LocateAnythingRunner:
                     segments.append(f"### PyTorch (CANONICAL, patches reverted) ###\n{unpatched_text}")
                 text = "\n\n".join(segments) + "\n"
 
-        # 3) Scale boxes back to original image
-        sx, sy = orig_w / self.eng_img_w, orig_h / self.eng_img_h
-        boxes = [(x1 * sx, y1 * sy, x2 * sx, y2 * sy) for (x1, y1, x2, y2) in boxes_eng]
+        # Boxes are already in original-image pixel space (TRT undoes letterbox,
+        # PT parses with orig_w/orig_h). No further scaling needed.
+        boxes = boxes_eng
 
-        # 4) Diagnostics
+        # 4) Diagnostics — record what the PT-canonical path actually sees so we can
+        # verify against canonical inference. Native image (NO pre-resize); whatever
+        # grid_hws the processor produces is what the model saw.
         if diagnostic or verbose:
             try:
-                # Deeper diagnostic: include the actual rendered chat-template prompt,
-                # token-id sequence, and image-token count so we can verify prompt
-                # construction matches canonical without re-running the model.
                 rendered_text = ""
                 token_ids = []
                 n_img_tokens_actual = 0
+                diag_grid_h, diag_grid_w = 0, 0
                 try:
-                    img_eng_diag = image.resize((self.eng_img_w, self.eng_img_h), Image.Resampling.BICUBIC)
-                    msg = [{"role":"user","content":[{"type":"image","image":img_eng_diag},
+                    msg = [{"role":"user","content":[{"type":"image","image":image},
                                                        {"type":"text","text":prompt}]}]
                     rendered_text = self.processor.py_apply_chat_template(
                         msg, tokenize=False, add_generation_prompt=True
@@ -619,6 +664,10 @@ class LocateAnythingRunner:
                     n_img_tokens_actual = int(
                         (enc_d["input_ids"] == int(self.config.image_token_index)).sum()
                     )
+                    gh_d = enc_d.get("image_grid_hws")
+                    if gh_d is not None:
+                        gh_arr = gh_d.tolist() if hasattr(gh_d, "tolist") else gh_d
+                        diag_grid_h, diag_grid_w = int(gh_arr[0][0]), int(gh_arr[0][1])
                 except Exception as _e:
                     rendered_text = f"<failed to render prompt: {_e}>"
 
@@ -627,8 +676,10 @@ class LocateAnythingRunner:
                     f"# path:             {path_used}\n"
                     f"# boxes:            {len(boxes)}\n"
                     f"# generation_mode:  {generation_mode}\n"
-                    f"# eng_img:          {self.eng_img_w}x{self.eng_img_h}\n"
-                    f"# grid_hws:         ({self.grid_h},{self.grid_w})\n"
+                    f"# orig_img:         {orig_w}x{orig_h}\n"
+                    f"# eng_img (TRT):    {self.eng_img_w}x{self.eng_img_h}\n"
+                    f"# diag_grid_hws:    ({diag_grid_h},{diag_grid_w})  [from processor on NATIVE image]\n"
+                    f"# eng_grid_hws:     ({self.grid_h},{self.grid_w})  [baked into TRT engine]\n"
                     f"# image_token_idx:  {int(self.config.image_token_index)}\n"
                     f"# image_tokens_in_input_ids: {n_img_tokens_actual}\n"
                     f"# input_ids_len:    {len(token_ids)}\n"
