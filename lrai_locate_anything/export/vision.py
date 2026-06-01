@@ -64,7 +64,7 @@ def export_vision(
     grid_h: int,
     grid_w: int,
     onnx_path: Path,
-    dtype: torch.dtype = torch.bfloat16,
+    dtype: torch.dtype = torch.float16,
     device: str = "cuda",
 ) -> Path:
     """Export VisionForExport(vit_model, grid_h, grid_w) to ONNX at onnx_path.

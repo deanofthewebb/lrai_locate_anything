@@ -677,19 +677,28 @@ class LocateAnythingRunner:
         vit_h = self.config.vision_config.hidden_size
         vit_feat_dim = vit_h * 4
 
-        # Export with the model's NATIVE bf16 dtype. The export wrappers now
-        # default their dummy tensors to bf16; the resulting ONNX has bf16
-        # weight + I/O dtypes, and build_engine sets BuilderFlag.BF16. PT
-        # inference runs at the same bf16, so TRT and PT use identical compute
-        # precision — closing the prefill cos_sim gap (was 0.945 with TRT fp16
-        # vs PT bf16; expected ~1.0 with both bf16).
+        # Mixed-precision export contract:
+        #   - vision_model + mlp1 (projector): traced as fp16, engines built fp16
+        #     (their cos_sim against PT is already 0.989/0.996 — not precision-
+        #     sensitive enough to justify bf16 build complexity)
+        #   - language_model (prefill, decode_mtp, decode_ar): traced as bf16,
+        #     engines built bf16+fp16 with BuilderFlag.BF16 (Qwen2 attention
+        #     scores need fp32's exponent range to match PT bf16)
+        # Cast each submodule to its export precision around its own export,
+        # then restore. PT inference still runs at the original REF_DTYPE (bf16).
         orig_dtype = next(self.model.parameters()).dtype
-        # No dtype cast required. The fingerprint includes _ENGINE_BUILD_VERSION
-        # so callers with cached fp16 engines auto-wipe and rebuild bf16.
-        cast_for_export = False
         try:
+            # Vision + projector: cast to fp16 for trace
+            if orig_dtype != torch.float16:
+                print(f"[runner] casting vision_model + mlp1 {orig_dtype} -> fp16 for ONNX export")
+                self.model.vision_model.to(dtype=torch.float16)
+                self.model.mlp1.to(dtype=torch.float16)
             export_vision(self.model.vision_model, self.grid_h, self.grid_w, ONNX_DIR / "vision.onnx")
             export_projector(self.model.mlp1, vit_feat_dim, ONNX_DIR / "projector.onnx")
+            if orig_dtype != torch.float16:
+                print(f"[runner] restoring vision_model + mlp1 fp16 -> {orig_dtype}")
+                self.model.vision_model.to(dtype=orig_dtype)
+                self.model.mlp1.to(dtype=orig_dtype)
 
             lm_main = self.model.language_model.model
             lm_head = self.model.language_model.lm_head
@@ -720,9 +729,13 @@ class LocateAnythingRunner:
                 onnx_path=ONNX_DIR / "llm_decode_ar.onnx",
             )
         finally:
-            if cast_for_export:
-                print(f"[runner] restoring model torch.float16 -> {orig_dtype} (PT inference dtype)")
-                self.model.to(dtype=orig_dtype)
+            # Defensive: ensure both submodules are restored to the original
+            # dtype even if an export raised mid-stream. PT inference relies
+            # on the full model being at REF_DTYPE (bf16).
+            if next(self.model.vision_model.parameters()).dtype != orig_dtype:
+                self.model.vision_model.to(dtype=orig_dtype)
+            if next(self.model.mlp1.parameters()).dtype != orig_dtype:
+                self.model.mlp1.to(dtype=orig_dtype)
 
     def build_engines(self, llm: bool = True):
         """Build vision + projector engines, and optionally the LLM prefill/decode
