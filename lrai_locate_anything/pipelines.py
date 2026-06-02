@@ -27,14 +27,21 @@ from .parse import iou
 def run_image(
     runner: LocateAnythingRunner,
     image,
-    prompt: str = "Locate all the instances that matches the following description: object.",
+    prompt: str = "Locate all the instances that matches the following description: objects.",
     max_new_tokens: int = 128,
     draw: bool = True,
+    path: str = "pt",
 ) -> Tuple[List[Tuple[float, float, float, float]], Image.Image, str]:
-    """Run single-image detection. Returns (boxes, annotated_image, raw_text)."""
+    """Run single-image detection. Returns (boxes, annotated_image, raw_text).
+
+    path: 'auto' picks TRT engines if loaded else PT; 'pt' forces PyTorch;
+          'trt' forces TensorRT. Default 'pt' because the TRT decode engines
+          currently return all-zero logits (the bf16-export regression
+          captured by the MTP-decode probe). Override to 'trt' or 'auto'
+          once the engines are fixed."""
     if isinstance(image, (str, Path)):
         image = Image.open(image).convert("RGB")
-    boxes, text = runner.detect(image, prompt, max_new_tokens=max_new_tokens)
+    boxes, text = runner.detect(image, prompt, max_new_tokens=max_new_tokens, path=path)
     if not draw:
         return boxes, image, text
     canvas = image.copy()
@@ -51,13 +58,17 @@ def run_video(
     runner: LocateAnythingRunner,
     input_path: Path | str,
     output_path: Path | str,
-    prompt: str = "Locate all the instances that matches the following description: person</c>luggage.",
+    prompt: str = "Locate all the instances that matches the following description: people</c>luggage.",
     max_frames: int = 40,
     max_new_tokens: int = 120,
     generation_mode: str = "hybrid",
+    path: str = "pt",
 ) -> dict:
     """Run per-frame detection on a video. Writes annotated mp4 to output_path.
     Returns a dict of metrics: total frames, total time, avg latency ms.
+
+    path: 'auto' / 'pt' / 'trt'. Default 'pt' until the TRT decode engines
+          are fixed (see run_image docstring).
     """
     if cv2 is None:
         raise ImportError("run_video requires opencv-python-headless")
@@ -79,7 +90,7 @@ def run_video(
         rgb = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         t0 = time.time()
         boxes, _ = runner.detect(rgb, prompt, max_new_tokens=max_new_tokens,
-                                  generation_mode=generation_mode)
+                                  generation_mode=generation_mode, path=path)
         latencies.append((time.time() - t0) * 1000)
         for (x1, y1, x2, y2) in boxes:
             cv2.rectangle(bgr, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
