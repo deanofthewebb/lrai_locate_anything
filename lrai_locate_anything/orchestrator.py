@@ -1147,19 +1147,6 @@ class LocateAnythingRunner:
             print(f"[detect] path={path} boxes={len(boxes)} chars={len(text)}")
             print(f"  raw: {preview}{'...' if len(text)>600 else ''}")
 
-        if len(boxes) == 0:
-            cmp_msg = ""
-            if comparison_out is not None:
-                _op, _ob, _ot, _oe = comparison_out
-                if _oe is None:
-                    cmp_msg = f" Compared {_op} path: {len(_ob)} boxes; first 200: {_ot[:200]!r}."
-                else:
-                    cmp_msg = f" Compared {_op} path raised: {_oe}."
-            raise RuntimeError(
-                f"detect() returned 0 boxes on path={path}. The model produced "
-                f"{len(text)} chars; first 200: {text[:200]!r}.{cmp_msg} "
-                f"Diagnostic dump written to {WORK / 'last_inference.txt'}."
-            )
         return boxes, text
 
     def _layer_diagnostic(self, image, prompt: str) -> str:
