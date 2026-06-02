@@ -253,6 +253,12 @@ def main() -> int:
                     help="Detection prompt (canonicalize_prompt auto-pluralizes singulars)")
     ap.add_argument("--device", default=None,
                     help="Override device (cpu/mps/cuda); default = autodetect")
+    ap.add_argument("--path", default="pt", choices=("auto", "pt", "trt"),
+                    help="Inference backend. Default 'pt' — the TRT decode engines "
+                         "currently return all-zero logits after the bf16 export "
+                         "switch (verified via MTP-decode probe in Colab dumps). "
+                         "Use 'trt' once the engine regression is fixed; 'auto' "
+                         "picks trt if engines loaded, else pt.")
     ap.add_argument("--max-side", type=int, default=0,
                     help="If >0, downscale each frame so its longest side <= max-side "
                          "before detect() (vision-attention memory caps VRAM-limited GPUs). "
@@ -334,7 +340,7 @@ def main() -> int:
 
         t0 = time.time()
         try:
-            boxes, _text = runner.detect(pil_in, canonical_prompt, diagnostic=False)
+            boxes, _text = runner.detect(pil_in, canonical_prompt, diagnostic=False, path=args.path)
         except RuntimeError as e:
             # detect() raises if 0 boxes; treat as no detections this frame
             if "returned 0 boxes" in str(e):
