@@ -339,14 +339,7 @@ def main() -> int:
             pil_in = pil
 
         t0 = time.time()
-        try:
-            boxes, _text = runner.detect(pil_in, canonical_prompt, diagnostic=False, path=args.path)
-        except RuntimeError as e:
-            # detect() raises if 0 boxes; treat as no detections this frame
-            if "returned 0 boxes" in str(e):
-                boxes = []
-            else:
-                raise
+        boxes, _text = runner.detect(pil_in, canonical_prompt, diagnostic=False, path=args.path)
         inference_time += time.time() - t0
         n_inferences += 1
         n_detections_total += len(boxes)

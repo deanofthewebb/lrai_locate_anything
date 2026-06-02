@@ -1069,12 +1069,16 @@ class LocateAnythingRunner:
                       model actually saw.
         verbose     : print raw text + token count.
 
+        Returns
+        -------
+        (boxes, text). Empty `boxes` paired with the raw `text` is a legitimate
+        empty-detection answer when the model emits no <box> tags — no exception
+        is raised in that case.
+
         Raises
         ------
         RuntimeError: prompt couldn't be canonicalized to the training phrasing,
-                      requested path is unavailable, or the model produced no
-                      <box> tags. NO silent return-zero — if you want to inspect
-                      a failure, call .diagnose() explicitly.
+                      or the requested path is unavailable.
         """
         if isinstance(image, (str, Path)):
             image = Image.open(image).convert("RGB")
