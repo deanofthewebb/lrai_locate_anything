@@ -230,6 +230,17 @@ def engine_inspector_precisions(eng_path: Path) -> str:
         prec_counts["OTHER"] += 1
 
     for layer in layers:
+        # TRT 10.16's engine_inspector emits Layers as a list of JSON-encoded
+        # STRINGS (one per layer), not parsed dicts. Re-parse if needed.
+        if isinstance(layer, str):
+            try:
+                layer = json.loads(layer)
+            except json.JSONDecodeError:
+                prec_counts["OTHER"] += 1
+                continue
+        if not isinstance(layer, dict):
+            prec_counts["OTHER"] += 1
+            continue
         _stamp_layer(layer)
 
     lines = [f"\n=== EngineInspector: {eng_path.name} ===",
