@@ -18,6 +18,30 @@ import tensorrt as trt
 from .engine import _DEFAULT_LOGGER
 
 
+class _CapturingLogger(trt.ILogger):
+    """TRT logger that forwards to the default logger AND captures ERROR-severity
+    messages so we can surface them in Python exceptions.
+
+    build_serialized_network returns None on failure with NO Python exception —
+    the actual error (hw-precision rejection, ONNX op unsupported, etc.) is
+    only emitted to the C++ logger. Without capturing, the only signal is the
+    None return, and our caller would raise a misleading "profile_spec keys
+    don't match" message that hides the real cause.
+    """
+    def __init__(self, inner: trt.ILogger):
+        trt.ILogger.__init__(self)
+        self.inner = inner
+        self.errors: list[str] = []
+
+    def log(self, severity, msg):
+        try:
+            self.inner.log(severity, msg)
+        except Exception:
+            pass
+        if severity in (trt.ILogger.ERROR, trt.ILogger.INTERNAL_ERROR):
+            self.errors.append(str(msg))
+
+
 def build_engine(
     onnx_path: Path | str,
     profile_spec: Dict[str, Tuple[tuple, tuple, tuple]],
@@ -48,10 +72,11 @@ def build_engine(
         print(f"[trt] cached: {out_engine}")
         return out_engine
 
-    logger = logger or _DEFAULT_LOGGER
-    builder = trt.Builder(logger)
+    inner_logger = logger or _DEFAULT_LOGGER
+    cap_logger = _CapturingLogger(inner_logger)
+    builder = trt.Builder(cap_logger)
     net = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
-    parser = trt.OnnxParser(net, logger)
+    parser = trt.OnnxParser(net, cap_logger)
     # parse_from_file (not parse(bytes)) so the parser can locate side-car external-data
     # files (.bin) that sit next to the .onnx (FP16 LLM + INT4 exports use them).
     if not parser.parse_from_file(str(onnx_path)):
@@ -81,10 +106,16 @@ def build_engine(
     t0 = time.time()
     plan = builder.build_serialized_network(net, cfg)
     if plan is None:
+        captured = "\n  ".join(cap_logger.errors) if cap_logger.errors else "(no TRT ERROR logs captured)"
         raise RuntimeError(
-            f"TRT build_serialized_network returned None for {name}. "
-            f"Most common cause: profile_spec keys don't match the ONNX input_names. "
-            f"Verify with: `import onnx; print([i.name for i in onnx.load('{onnx_path}', load_external_data=False).graph.input])`"
+            f"TRT build_serialized_network returned None for {name}.\n"
+            f"Captured TRT ERROR(s):\n  {captured}\n\n"
+            f"If captured says 'BF16 precision require hardware with BF16 support': "
+            f"you're on pre-Ampere hardware (sm<80, e.g. Turing 2080 Ti). BF16 needs "
+            f"sm_80+ (A100/H100/Ada). Either run on Ampere+ or pass bf16=False.\n"
+            f"If captured is empty, the most common cause is profile_spec keys not "
+            f"matching the ONNX input_names. Verify with: "
+            f"`import onnx; print([i.name for i in onnx.load('{onnx_path}', load_external_data=False).graph.input])`"
         )
     out_engine.write_bytes(plan)
     print(f"[trt]   built in {time.time()-t0:.1f}s -> {out_engine}  ({out_engine.stat().st_size/1e9:.2f} GB)")
