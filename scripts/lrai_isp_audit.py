@@ -253,6 +253,11 @@ def main() -> int:
                     help="Detection prompt (canonicalize_prompt auto-pluralizes singulars)")
     ap.add_argument("--device", default=None,
                     help="Override device (cpu/mps/cuda); default = autodetect")
+    ap.add_argument("--max-side", type=int, default=0,
+                    help="If >0, downscale each frame so its longest side <= max-side "
+                         "before detect() (vision-attention memory caps VRAM-limited GPUs). "
+                         "Boxes are rescaled back to ORIGINAL frame pixel space for "
+                         "tracker_bot CSV compatibility. Typical: 1280 for 2080 Ti.")
     args = ap.parse_args()
 
     # Lazy import so --help works without torch
@@ -315,9 +320,21 @@ def main() -> int:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
 
+        # Optional downscale: keep aspect, longest side = max_side. Boxes get
+        # rescaled back to original frame coords so the counting-line geometry
+        # (and the tracker_bot CSV) stays in source pixel space.
+        scale = 1.0
+        if args.max_side and max(pil.size) > args.max_side:
+            scale = args.max_side / float(max(pil.size))
+            new_w = int(round(pil.size[0] * scale))
+            new_h = int(round(pil.size[1] * scale))
+            pil_in = pil.resize((new_w, new_h), Image.Resampling.BILINEAR)
+        else:
+            pil_in = pil
+
         t0 = time.time()
         try:
-            boxes, _text = runner.detect(pil, canonical_prompt, diagnostic=False)
+            boxes, _text = runner.detect(pil_in, canonical_prompt, diagnostic=False)
         except RuntimeError as e:
             # detect() raises if 0 boxes; treat as no detections this frame
             if "returned 0 boxes" in str(e):
@@ -327,6 +344,10 @@ def main() -> int:
         inference_time += time.time() - t0
         n_inferences += 1
         n_detections_total += len(boxes)
+
+        if scale != 1.0 and boxes:
+            inv = 1.0 / scale
+            boxes = [(x1 * inv, y1 * inv, x2 * inv, y2 * inv) for (x1, y1, x2, y2) in boxes]
 
         # Tracker + crossing eval
         tracks = tracker.update(list(boxes), frame_idx)
