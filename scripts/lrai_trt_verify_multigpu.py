@@ -48,6 +48,12 @@ def main() -> int:
     ap.add_argument("--max-new-tokens", type=int, default=128)
     args = ap.parse_args()
 
+    # Production: TRT-only inference. Force PT model to CPU so it doesn't
+    # consume GPU VRAM that the TRT engines need. The PT model still loads
+    # (the runner reads tokenizer/processor/config from it) but won't sit
+    # in CUDA memory. Must be set BEFORE importing lrai_locate_anything.
+    os.environ.setdefault("LRAI_PT_CPU_ONLY", "1")
+
     from cuda.bindings import runtime as cudart
     n_dev = cudart.cudaGetDeviceCount()[1]
     print(f"[verify] CUDA devices: {n_dev}", file=sys.stderr)

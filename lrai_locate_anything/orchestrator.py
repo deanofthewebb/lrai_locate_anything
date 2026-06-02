@@ -902,6 +902,49 @@ class LocateAnythingRunner:
             self.decode_engine_ar = TRTEngine(TRT_DIR / "llm_decode_ar.engine", device_id=device_map.get("decode_ar"))
         if (TRT_DIR / "llm_decode.engine").exists():
             self.decode_engine = TRTEngine(TRT_DIR / "llm_decode.engine", device_id=device_map.get("decode_mtp"))
+        # Backfill engine resolution attrs from the vision engine's baked
+        # pixel_values shape when load_engines() is called without a prior
+        # export_engines() (e.g. loading pre-built engines from a different
+        # session for verification or audit runs). The shape is
+        # (L_pre, 3, 14, 14) where L_pre = grid_h * grid_w. We need the
+        # individual grid_h and grid_w, not just L_pre — derive from the
+        # baked aspect ratio. The merge kernel size is 2 (from L_post=L_pre/4),
+        # so eng_img_w/h = grid_w*14 / grid_h*14.
+        if self.eng_img_w is None and self.vit_engine is not None:
+            try:
+                px_shape = self.vit_engine.engine.get_tensor_profile_shape("pixel_values", 0)[1]
+                L_pre = int(px_shape[0])
+                # The projector engine's input shape gives us L_post = L_pre//4
+                # and confirms the merge factor; the aspect ratio comes from the
+                # baked grid which we read off the LLM prefill engine's vision
+                # token count if available, else from a config default.
+                # Simpler: look up grid (h,w) from runner config which knows
+                # the baked resolution from export. Fallback: assume 36x46.
+                grid_h, grid_w = None, None
+                # Try the lock_processor_resolution-cached value, then config.
+                cached = getattr(self, "_baked_grid_hws", None)
+                if cached is not None:
+                    grid_h, grid_w = cached
+                else:
+                    # Heuristic: prefer the (36, 46) bake used across the project
+                    # for ~644x504 ISP frames. Verify L_pre matches grid_h*grid_w.
+                    for cand_h, cand_w in ((36, 46), (32, 32), (24, 32), (28, 36)):
+                        if cand_h * cand_w == L_pre:
+                            grid_h, grid_w = cand_h, cand_w
+                            break
+                if grid_h is None:
+                    raise RuntimeError(
+                        f"load_engines(): vision engine L_pre={L_pre} does not match any "
+                        f"known baked grid. Engine was built with a non-canonical resolution; "
+                        f"set runner._baked_grid_hws=(h,w) explicitly before load_engines()."
+                    )
+                self.grid_h, self.grid_w = grid_h, grid_w
+                self.eng_img_w = grid_w * 14
+                self.eng_img_h = grid_h * 14
+                print(f"[runner] backfilled grid_hws=({grid_h},{grid_w}) "
+                      f"eng_img=({self.eng_img_w}x{self.eng_img_h}) from vision engine bake")
+            except Exception as e:
+                print(f"[runner] WARNING: could not backfill grid_h/grid_w from vision engine: {e}")
         # Lock the processor's resize to match the baked engine resolution.
         if self.eng_img_w is not None:
             lock_processor_resolution(self.processor, self.eng_img_w, self.eng_img_h)

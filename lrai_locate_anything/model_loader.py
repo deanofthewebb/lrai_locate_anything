@@ -82,9 +82,21 @@ def load_locateanything_3b(
 
     # The torch_dtype kwarg is deprecated in transformers >=4.55 (use `dtype=`) but
     # still accepted; we pass torch_dtype for broad compatibility.
+    # Device placement. The PT model exists for:
+    #   - diagnostics / sanity checks (PT-vs-TRT cross-validation)
+    #   - tokenizer + processor + config introspection
+    # Production inference is TRT-only, so keeping the 7 GB LM on GPU when the
+    # caller will route through TRT engines just wastes VRAM. Set
+    # LRAI_PT_CPU_ONLY=1 to force CPU residency for the PT model (TRT engines
+    # are unaffected — they manage their own device placement via TRTEngine).
+    _pt_cpu_only = os.environ.get("LRAI_PT_CPU_ONLY", "0") not in ("0", "", "false", "False")
+    _device = "cpu" if _pt_cpu_only else ("cuda" if torch.cuda.is_available() else "cpu")
+    if _pt_cpu_only and verbose:
+        print("[loader] LRAI_PT_CPU_ONLY=1 — PT model will reside on CPU "
+              "(use TRT engines for production inference; PT path will OOM-warn).")
     model = AutoModel.from_pretrained(
         str(local), trust_remote_code=True, torch_dtype=dtype, config=config,
-    ).eval().to("cuda" if torch.cuda.is_available() else "cpu")
+    ).eval().to(_device)
 
     n_params = sum(p.numel() for p in model.parameters())
     if verbose:
