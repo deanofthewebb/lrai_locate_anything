@@ -53,6 +53,55 @@ def _letterbox(img: Image.Image, target_w: int, target_h: int,
 # ---------------------------------------------------------------------------
 _CANONICAL_PREFIX = "Locate all the instances that matches the following description: "
 
+# Common irregular plurals. LocateAnything-3B is sensitive to singular vs plural
+# phrasing — "cat" returns 1 box (the dominant cat), "cats" returns all of them.
+# We default to plural for higher recall on every detect() call.
+_IRREGULAR_PLURALS = {
+    "person": "people", "child": "children", "mouse": "mice",
+    "man": "men", "woman": "women", "foot": "feet", "tooth": "teeth",
+    "goose": "geese", "sheep": "sheep", "deer": "deer",
+    "fish": "fish", "ox": "oxen",
+    "luggage": "luggage", "equipment": "equipment", "furniture": "furniture",
+}
+
+
+def _pluralize_one(word: str) -> str:
+    """English heuristic pluralization for a single noun. Preserves
+    already-plural words and known mass nouns / irregulars. Falls back to
+    appending 's' for the common case."""
+    if not word:
+        return word
+    lower = word.lower()
+    if lower in _IRREGULAR_PLURALS:
+        return _IRREGULAR_PLURALS[lower]
+    # Already plural-shaped (ends in s/es/ies/ces or known plural suffixes)
+    if (lower.endswith("s") or lower.endswith("ies") or lower.endswith("es")
+            or lower in _IRREGULAR_PLURALS.values()):
+        return word
+    # consonant + y -> -ies (city -> cities, but not toy -> toys)
+    if len(word) >= 2 and word[-1].lower() == "y" and word[-2].lower() not in "aeiou":
+        return word[:-1] + "ies"
+    # x/s/z/ch/sh -> +es (box -> boxes, bus -> buses, watch -> watches)
+    if lower.endswith(("x", "ch", "sh", "ss", "z")):
+        return word + "es"
+    # Default: +s
+    return word + "s"
+
+
+def pluralize_target(target: str) -> str:
+    """Pluralize the target portion of a canonical prompt. Handles multi-class
+    targets joined by '</c>'."""
+    if "</c>" in target:
+        return "</c>".join(_pluralize_one(t.strip()) for t in target.split("</c>"))
+    # Single-class: target may itself be a phrase like "the red cars" — only
+    # pluralize the head noun (last word) to avoid corrupting modifiers.
+    parts = target.strip().split()
+    if not parts:
+        return target
+    parts[-1] = _pluralize_one(parts[-1])
+    return " ".join(parts)
+
+
 def canonicalize_prompt(prompt: str) -> Tuple[str, bool]:
     """Rewrite natural-language prompts to the model's canonical training phrasing.
 
@@ -63,11 +112,29 @@ def canonicalize_prompt(prompt: str) -> Tuple[str, bool]:
     to mode-collapse on the mask token. This helper extracts the object
     description from common natural-language phrasings and reformats to canonical.
 
+    By default we also PLURALIZE the target so 'cat' becomes 'cats' — the model
+    is plural-sensitive and singular forms return only the dominant instance.
+    For locate-the-single-X intent, pre-canonicalize manually and skip this
+    helper. See pluralize_target() for the heuristic.
+
     Returns (rewritten_prompt, was_rewritten).
     """
     p = prompt.strip()
     if "matches the following description:" in p.lower():
-        return p, False
+        # Already in canonical shape; we ONLY pluralize the target for recall.
+        m = re.search(r"matches the following description:\s*(.+?)\.?\s*$", p, re.I)
+        if not m:
+            return p, False
+        target = m.group(1).strip().rstrip(".")
+        plural = pluralize_target(target)
+        if plural == target:
+            return p, False
+        rewritten = re.sub(
+            r"(matches the following description:\s*)(.+?)\.?\s*$",
+            lambda mm: mm.group(1) + plural + ".",
+            p, flags=re.I,
+        )
+        return rewritten, True
     # Strip boilerplate suffix ("Return bounding boxes", "Please provide", etc.)
     p = re.sub(r"[\.,]?\s*(return|provide|give|find|with|please)\s+(bounding\s+box(es)?|boxes|coordinates)\s*\.?\s*$",
                "", p, flags=re.I)
@@ -88,6 +155,8 @@ def canonicalize_prompt(prompt: str) -> Tuple[str, bool]:
     target = re.sub(r"[\.\?!]+\s*$", "", target).strip()
     if not target:
         return prompt, False
+    # Pluralize for higher recall — see docstring.
+    target = pluralize_target(target)
     return _CANONICAL_PREFIX + target + ".", True
 
 
