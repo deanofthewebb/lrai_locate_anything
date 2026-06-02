@@ -15,13 +15,14 @@
 # any path with the matching --flag.
 #
 # GPU pinning + per-GPU VRAM headroom:
-#   GPU 0 -> RTX 3080 (10 GB)    --max-side 2048   (model is 7.66 GB bf16; 10 GB is tight)
+#   GPU 0 -> RTX 3080 (10 GB)    --max-side 1280   (model is 7.74 GB bf16; 10 GB is tight)
 #   GPU 1 -> RTX 3080 Ti (12 GB) --max-side 0      (full 4K resolution, fits)
 # Swap per the actual numbering on your machine if learn02 reports differently.
 #
 # Output files (per-clip):
 #   <out>/<key>_lrai_fps5.csv          counting CSV
 #   <out>/<key>_lrai_fps5.log          stderr stream
+#   <out>/<key>_overlay.mp4            QA overlay video (boxes + count lines)
 #   <out>/queue.lock                   flock guard on the work queue
 #   <out>/queue.txt                    remaining clips (rewritten by workers)
 
@@ -108,6 +109,7 @@ worker() {
     local fname="${CLIPS[$key]}"
     local out_csv="$OUT_DIR/${key}_lrai_fps${TARGET_FPS}.csv"
     local out_log="$OUT_DIR/${key}_lrai_fps${TARGET_FPS}.log"
+    local out_video="$OUT_DIR/${key}_overlay.mp4"
 
     if [ -s "$out_csv" ]; then
       echo "[$tag] SKIP $key (csv already present)"
@@ -121,6 +123,7 @@ worker() {
         --video "$VIDEOS_DIR/$fname" \
         --lines "$LINES_DIR/${key}.json" \
         --out-csv "$out_csv" \
+        --out-video "$out_video" \
         --target-fps "$TARGET_FPS" \
         --weights "$WEIGHTS" \
         --prompt "$PROMPT" \
@@ -139,10 +142,11 @@ worker() {
 }
 
 # ---- Spawn workers --------------------------------------------------------
-# GPU 0 = 3080 (10 GB) -> downscale to 2048 longest side to stay safely below
-#                          OOM; full 4K with the 7.66 GB bf16 model can clip
+# GPU 0 = 3080 (10 GB) -> downscale to 1280 longest side. 2048 OOM'd on model
+#                          load (7.74 GB bf16 + activations > 10 GB); 1280
+#                          leaves ~2 GB headroom for activations + decode.
 # GPU 1 = 3080 Ti (12 GB) -> no downscale; full 4K fits
-worker 0 2048 &
+worker 0 1280 &
 PID0=$!
 worker 1 0 &
 PID1=$!
