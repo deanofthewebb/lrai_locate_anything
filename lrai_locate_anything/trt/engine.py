@@ -17,7 +17,7 @@ BF16 binding support:
 """
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 import numpy as np
 import tensorrt as trt
@@ -54,9 +54,32 @@ def _trt_dtype_to_np(td) -> "np.dtype":
 
 
 class TRTEngine:
-    """Load + run a TensorRT engine with named feed/output dicts."""
+    """Load + run a TensorRT engine with named feed/output dicts.
 
-    def __init__(self, path: Path | str, logger: trt.Logger | None = None):
+    Multi-GPU placement:
+        Pass `device_id=N` to bind this engine to a specific GPU. The CUDA
+        device is set before deserialization (so the engine's resident memory
+        lives on GPU N) and before every __call__ (so cudaMalloc / cudaMemcpy
+        target the right device). Useful for splitting LocateAnything's TRT
+        pipeline across two GPUs when no single card fits all engines —
+        e.g. on learn02: vision+proj+decode_ar on GPU 0 (3080 10 GB),
+        prefill on GPU 1 (3080 Ti 12 GB).
+
+        device_id=None (default) leaves the current device alone, matching
+        legacy single-GPU behavior.
+
+        Cross-GPU data movement is automatic: engine I/O round-trips through
+        host (numpy) buffers between calls, so feeding output from one
+        engine to another on a different device just works.
+    """
+
+    def __init__(self, path: Path | str, logger: trt.Logger | None = None,
+                 device_id: Optional[int] = None):
+        self.device_id = device_id
+        if device_id is not None:
+            err = cudart.cudaSetDevice(device_id)
+            if err[0] != cudart.cudaError_t.cudaSuccess:
+                raise RuntimeError(f"cudaSetDevice({device_id}) failed: {err}")
         rt = trt.Runtime(logger or _DEFAULT_LOGGER)
         self.engine = rt.deserialize_cuda_engine(Path(path).read_bytes())
         self.ctx = self.engine.create_execution_context()
@@ -67,7 +90,17 @@ class TRTEngine:
         self.dtype = {n: _trt_dtype_to_np(self.trt_dtype[n]) for n in self.io}
         self.is_bf16 = {n: (self.trt_dtype[n] == trt.DataType.BF16) for n in self.io}
 
+    def _bind_device(self):
+        """Ensure subsequent cuda calls target this engine's GPU (no-op if device_id=None)."""
+        if self.device_id is not None:
+            err = cudart.cudaSetDevice(self.device_id)
+            if err[0] != cudart.cudaError_t.cudaSuccess:
+                raise RuntimeError(f"cudaSetDevice({self.device_id}) failed: {err}")
+
     def __call__(self, feed: Dict[str, Union[np.ndarray, "torch.Tensor"]]) -> Dict[str, np.ndarray]:
+        # Pin subsequent cudaMalloc / cudaMemcpy to this engine's GPU. No-op
+        # when device_id=None (legacy single-GPU usage).
+        self._bind_device()
         bufs = []
         outs: Dict[str, tuple] = {}
         # Bind inputs

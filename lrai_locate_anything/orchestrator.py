@@ -841,8 +841,25 @@ class LocateAnythingRunner:
         # not inherited from a prior session with a broken lm_head.
         self._llm_engines_rebuilt_this_session = True
 
-    def load_engines(self):
+    def load_engines(self, device_map: dict | None = None):
+        """Load TRT engines into memory.
+
+        device_map: optional dict mapping engine key -> CUDA device id, used to
+            place engines across multiple GPUs when no single card has enough
+            VRAM for all of them. Keys: "vision", "projector", "prefill",
+            "decode_ar", "decode_mtp". Missing keys default to the current
+            CUDA device (single-GPU legacy behavior).
+
+            Example on a 10 GB + 12 GB box:
+                runner.load_engines(device_map={"vision": 0, "projector": 0,
+                                                "decode_ar": 0, "decode_mtp": 0,
+                                                "prefill": 1})
+            Cross-device data movement is automatic: TRTEngine round-trips I/O
+            through host buffers between calls, so feeding output from one
+            engine to another on a different GPU just works.
+        """
         from .trt.engine import TRTEngine
+        device_map = device_map or {}
         # Guard against loading STALE engines: if the loader rescued lm_head this
         # session AND we did NOT also rebuild the LLM engines this session, the
         # .engine files on disk came from a prior session with a broken lm_head.
@@ -876,15 +893,15 @@ class LocateAnythingRunner:
                 "    runner.load_engines()"
             )
         if (TRT_DIR / "vision.engine").exists():
-            self.vit_engine = TRTEngine(TRT_DIR / "vision.engine")
+            self.vit_engine = TRTEngine(TRT_DIR / "vision.engine", device_id=device_map.get("vision"))
         if (TRT_DIR / "projector.engine").exists():
-            self.proj_engine = TRTEngine(TRT_DIR / "projector.engine")
+            self.proj_engine = TRTEngine(TRT_DIR / "projector.engine", device_id=device_map.get("projector"))
         if (TRT_DIR / "llm_prefill.engine").exists():
-            self.prefill_engine = TRTEngine(TRT_DIR / "llm_prefill.engine")
+            self.prefill_engine = TRTEngine(TRT_DIR / "llm_prefill.engine", device_id=device_map.get("prefill"))
         if (TRT_DIR / "llm_decode_ar.engine").exists():
-            self.decode_engine_ar = TRTEngine(TRT_DIR / "llm_decode_ar.engine")
+            self.decode_engine_ar = TRTEngine(TRT_DIR / "llm_decode_ar.engine", device_id=device_map.get("decode_ar"))
         if (TRT_DIR / "llm_decode.engine").exists():
-            self.decode_engine = TRTEngine(TRT_DIR / "llm_decode.engine")
+            self.decode_engine = TRTEngine(TRT_DIR / "llm_decode.engine", device_id=device_map.get("decode_mtp"))
         # Lock the processor's resize to match the baked engine resolution.
         if self.eng_img_w is not None:
             lock_processor_resolution(self.processor, self.eng_img_w, self.eng_img_h)
