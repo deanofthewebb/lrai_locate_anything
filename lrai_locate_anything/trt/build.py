@@ -51,6 +51,7 @@ def build_engine(
     workspace_gb: int = 4,
     name: str = "engine",
     logger: trt.Logger | None = None,
+    strongly_typed: bool = False,
 ) -> Path:
     """Build a single TRT engine from ONNX with one optimisation profile.
 
@@ -66,6 +67,16 @@ def build_engine(
         REF_DTYPE choice (bfloat16) and is the leading suspect for the TRT
         decode divergence (prefill cos_sim 0.945 vs PT bf16). A100 has BF16
         tensor cores; TRT 10.x supports BuilderFlag.BF16.
+      - strongly_typed=True: build with NetworkDefinitionCreationFlag.STRONGLY_TYPED.
+        ONNX dtypes are HONORED EXACTLY — TRT cannot promote/demote layer
+        precisions for tactic selection. With BuilderFlag.BF16 alone, TRT may
+        silently demote BF16 ops to FP16 if it judges a faster tactic exists
+        (verified via polygraphy inspect --show layers). STRONGLY_TYPED removes
+        that freedom: an ONNX op declared bf16 stays bf16. fp16/bf16 builder
+        flags are then ignored (the ONNX is the source of truth).
+        Required to keep LLM prefill/decode cos_sim above 0.99 vs PT bf16 —
+        without it, prefill_cos saturates at ~0.945 (the empirical FP16
+        precision-loss envelope on Qwen2 attention scores).
     """
     out_engine = Path(out_engine)
     if out_engine.exists():
@@ -75,7 +86,17 @@ def build_engine(
     inner_logger = logger or _DEFAULT_LOGGER
     cap_logger = _CapturingLogger(inner_logger)
     builder = trt.Builder(cap_logger)
-    net = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    # Compose network flags. EXPLICIT_BATCH is required for ONNX-parsed networks
+    # in TRT 10.x; STRONGLY_TYPED additionally locks layer precisions to ONNX.
+    net_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    if strongly_typed:
+        if not hasattr(trt.NetworkDefinitionCreationFlag, "STRONGLY_TYPED"):
+            raise RuntimeError(
+                f"NetworkDefinitionCreationFlag.STRONGLY_TYPED not available in "
+                f"tensorrt=={trt.__version__}. Upgrade TRT to >=9.0 for STRONGLY_TYPED."
+            )
+        net_flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    net = builder.create_network(net_flags)
     parser = trt.OnnxParser(net, cap_logger)
     # parse_from_file (not parse(bytes)) so the parser can locate side-car external-data
     # files (.bin) that sit next to the .onnx (FP16 LLM + INT4 exports use them).
@@ -86,16 +107,19 @@ def build_engine(
 
     cfg = builder.create_builder_config()
     cfg.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gb << 30)
-    if fp16:
-        cfg.set_flag(trt.BuilderFlag.FP16)
-    if bf16:
-        # TRT 10.x: BuilderFlag.BF16 allows BF16 compute on layers that support it.
-        if not hasattr(trt.BuilderFlag, "BF16"):
-            raise RuntimeError(
-                f"BuilderFlag.BF16 not available in tensorrt=={trt.__version__}. "
-                f"Upgrade TRT to >=10.0 for BF16 support."
-            )
-        cfg.set_flag(trt.BuilderFlag.BF16)
+    # In STRONGLY_TYPED mode, builder precision flags are ignored — ONNX dtypes
+    # are the source of truth. Set them anyway for non-strongly_typed callers.
+    if not strongly_typed:
+        if fp16:
+            cfg.set_flag(trt.BuilderFlag.FP16)
+        if bf16:
+            # TRT 10.x: BuilderFlag.BF16 allows BF16 compute on layers that support it.
+            if not hasattr(trt.BuilderFlag, "BF16"):
+                raise RuntimeError(
+                    f"BuilderFlag.BF16 not available in tensorrt=={trt.__version__}. "
+                    f"Upgrade TRT to >=10.0 for BF16 support."
+                )
+            cfg.set_flag(trt.BuilderFlag.BF16)
 
     prof = builder.create_optimization_profile()
     for n, (lo, opt, hi) in profile_spec.items():
@@ -195,28 +219,33 @@ def build_llm(prefill_onnx: Path, decode_onnx: Path,
         "position_ids":    ((1, s_min), (1, s_opt), (1, s_max)),
         "attention_mask":  ((1, s_min), (1, s_opt), (1, s_max)),
     }
-    # Enable BF16 alongside FP16 for the LLM engines. Qwen2 attention scores
-    # and RMSNorm are precision-sensitive — TRT picks BF16 for those layers,
-    # FP16 for the rest (and FP16 at the numpy I/O boundary). This is the
-    # remaining precision-drift fix after the dual-engine routing fix.
-    # Pop from kw so the caller can override per-call without TypeError on
-    # multiple values for keyword argument.
+    # STRONGLY_TYPED build: ONNX dtypes are honored exactly. Our bf16 ONNX
+    # (bf16 initializers + bf16 KV-cache I/O + fp32 logits output) is the
+    # canonical precision contract — STRONGLY_TYPED prevents TRT from silently
+    # demoting bf16 attention/MatMul/Softmax/RMSNorm to fp16 during tactic
+    # selection. Polygraphy inspect confirms this is what was happening with
+    # the prior BuilderFlag.BF16-alone path (prefill cos_sim stuck at 0.945).
+    # fp16/bf16 builder flags are ignored under STRONGLY_TYPED.
     llm_fp16 = kw.pop("fp16", True)
     llm_bf16 = kw.pop("bf16", True)
+    llm_strongly_typed = kw.pop("strongly_typed", True)
 
     pre = build_engine(prefill_onnx, pref_prof, prefill_engine,
                        workspace_gb=workspace_gb, name="llm_prefill",
-                       fp16=llm_fp16, bf16=llm_bf16, **kw)
+                       fp16=llm_fp16, bf16=llm_bf16,
+                       strongly_typed=llm_strongly_typed, **kw)
 
     dec_prof = _decode_profile(n_layers, n_kv_heads, head_dim, p_min, p_opt, p_max)
     dec = build_engine(decode_onnx, dec_prof, decode_engine,
                        workspace_gb=workspace_gb, name="llm_decode_mtp",
-                       fp16=llm_fp16, bf16=llm_bf16, **kw)
+                       fp16=llm_fp16, bf16=llm_bf16,
+                       strongly_typed=llm_strongly_typed, **kw)
 
     dec_ar = None
     if decode_ar_onnx is not None and decode_ar_engine is not None:
         dec_ar = build_engine(decode_ar_onnx, dec_prof, decode_ar_engine,
                               workspace_gb=workspace_gb, name="llm_decode_ar",
-                              fp16=llm_fp16, bf16=llm_bf16, **kw)
+                              fp16=llm_fp16, bf16=llm_bf16,
+                              strongly_typed=llm_strongly_typed, **kw)
 
     return pre, dec, dec_ar

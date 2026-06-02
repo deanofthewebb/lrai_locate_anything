@@ -1,0 +1,2631 @@
+[W] 'colored' module is not installed, will not use colors when logging. To enable colors, please install the 'colored' module: python3 -m pip install colored
+[I] Loading bytes from /mnt/ssd0/dean/locany/engines/llm_prefill.engine
+[W] hasImplicitBatchDimension is deprecated and always return false.
+[W] Engine profiling verbosity: ProfilingVerbosity.LAYER_NAMES_ONLY. Some layer info may be missing. Set higher verbosity for more detail.
+[I] ==== TensorRT Engine ====
+    Name: Unnamed Network 0 | Explicit Batch Engine
+    
+    ---- 4 Engine Input(s) ----
+    {input_ids [dtype=int64, shape=(1, -1)],
+     visual_features [dtype=bfloat16, shape=(-1, 2048)],
+     position_ids [dtype=int64, shape=(1, -1)],
+     attention_mask [dtype=int64, shape=(1, -1)]}
+    
+    ---- 73 Engine Output(s) ----
+    {logits [dtype=float32, shape=(1, -1, 152681)],
+     present_k_0 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_0 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_1 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_1 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_2 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_2 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_3 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_3 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_4 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_4 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_5 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_5 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_6 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_6 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_7 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_7 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_8 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_8 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_9 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_9 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_10 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_10 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_11 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_11 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_12 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_12 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_13 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_13 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_14 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_14 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_15 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_15 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_16 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_16 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_17 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_17 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_18 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_18 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_19 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_19 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_20 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_20 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_21 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_21 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_22 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_22 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_23 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_23 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_24 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_24 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_25 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_25 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_26 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_26 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_27 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_27 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_28 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_28 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_29 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_29 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_30 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_30 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_31 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_31 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_32 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_32 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_33 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_33 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_34 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_34 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_k_35 [dtype=bfloat16, shape=(1, 2, -1, 128)],
+     present_v_35 [dtype=bfloat16, shape=(1, 2, -1, 128)]}
+    
+    ---- Memory ----
+    Device Memory: 2535261696 bytes
+    
+    ---- 1 Profile(s) (77 Tensor(s) Each) ----
+    - Profile: 0
+        Tensor: input_ids                (Input), Index: 0 | Shapes: min=(1, 16), opt=(1, 1024), max=(1, 4096)
+        Tensor: visual_features          (Input), Index: 1 | Shapes: min=(1, 2048), opt=(1024, 2048), max=(4096, 2048)
+        Tensor: position_ids             (Input), Index: 2 | Shapes: min=(1, 16), opt=(1, 1024), max=(1, 4096)
+        Tensor: attention_mask           (Input), Index: 3 | Shapes: min=(1, 16), opt=(1, 1024), max=(1, 4096)
+        Tensor: logits                  (Output), Index: 4 | Shape: (1, -1, 152681)
+        Tensor: present_k_0             (Output), Index: 5 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_0             (Output), Index: 6 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_1             (Output), Index: 7 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_1             (Output), Index: 8 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_2             (Output), Index: 9 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_2             (Output), Index: 10 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_3             (Output), Index: 11 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_3             (Output), Index: 12 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_4             (Output), Index: 13 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_4             (Output), Index: 14 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_5             (Output), Index: 15 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_5             (Output), Index: 16 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_6             (Output), Index: 17 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_6             (Output), Index: 18 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_7             (Output), Index: 19 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_7             (Output), Index: 20 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_8             (Output), Index: 21 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_8             (Output), Index: 22 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_9             (Output), Index: 23 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_9             (Output), Index: 24 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_10            (Output), Index: 25 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_10            (Output), Index: 26 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_11            (Output), Index: 27 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_11            (Output), Index: 28 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_12            (Output), Index: 29 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_12            (Output), Index: 30 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_13            (Output), Index: 31 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_13            (Output), Index: 32 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_14            (Output), Index: 33 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_14            (Output), Index: 34 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_15            (Output), Index: 35 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_15            (Output), Index: 36 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_16            (Output), Index: 37 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_16            (Output), Index: 38 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_17            (Output), Index: 39 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_17            (Output), Index: 40 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_18            (Output), Index: 41 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_18            (Output), Index: 42 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_19            (Output), Index: 43 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_19            (Output), Index: 44 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_20            (Output), Index: 45 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_20            (Output), Index: 46 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_21            (Output), Index: 47 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_21            (Output), Index: 48 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_22            (Output), Index: 49 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_22            (Output), Index: 50 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_23            (Output), Index: 51 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_23            (Output), Index: 52 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_24            (Output), Index: 53 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_24            (Output), Index: 54 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_25            (Output), Index: 55 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_25            (Output), Index: 56 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_26            (Output), Index: 57 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_26            (Output), Index: 58 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_27            (Output), Index: 59 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_27            (Output), Index: 60 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_28            (Output), Index: 61 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_28            (Output), Index: 62 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_29            (Output), Index: 63 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_29            (Output), Index: 64 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_30            (Output), Index: 65 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_30            (Output), Index: 66 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_31            (Output), Index: 67 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_31            (Output), Index: 68 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_32            (Output), Index: 69 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_32            (Output), Index: 70 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_33            (Output), Index: 71 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_33            (Output), Index: 72 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_34            (Output), Index: 73 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_34            (Output), Index: 74 | Shape: (1, 2, -1, 128)
+        Tensor: present_k_35            (Output), Index: 75 | Shape: (1, 2, -1, 128)
+        Tensor: present_v_35            (Output), Index: 76 | Shape: (1, 2, -1, 128)
+    
+    ---- 410 Layer(s) ----
+    Layer 0    | [trainStation1] [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 1    | __mye422_0_myl1_0 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 2    | __myl_ReshEqlReshRepl_myl1_1 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 3    | /m/NonZero [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 4    | /m/NonZero[size][DevicetoShapeHostCopy] [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 5    | [trainStation2] [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 6    | __mye201744_0_myl5_0 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 7    | __myl_CastGathResh_myl5_1 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 8    | __myl_Tran_myl5_2 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 9    | __myl_ReshSlicScat_myl5_3 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 10   | __myl_ReshCastMulMeanAddSqrtDivMulCastMul_myl5_4 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 11   | /m/layers.0/self_attn/v_proj/MatMul+/m/layers.0/self_attn/k_proj/MatMul+/m/layers.0/self_attn/q_proj/MatMul_myl5_5 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 12   | __myl_ReshTranReshReplReshMove_myl5_6 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 13   | __myl_CastSlicGathReshSlicGathReshReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshTranMulSlicEtc_myl5_7 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 14   | __myl_ReshCastReplSubCastSeleCastReplIotaIotaReplCastCastIotaCastReshAddReshLtReplSeleCastAddEqlEtc_myl5_8 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 15   | _gemm_mha_v2_myl5_9 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 16   | /m/layers.0/self_attn/o_proj/MatMul_myl5_10 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 17   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_11 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 18   | /m/layers.0/mlp/up_proj/MatMul+/m/layers.0/mlp/gate_proj/MatMul_myl5_12 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 19   | __myl_SiluMul_myl5_13 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 20   | /m/layers.0/mlp/down_proj/MatMul_myl5_14 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 21   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_15 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 22   | /m/layers.1/self_attn/v_proj/MatMul+/m/layers.1/self_attn/k_proj/MatMul+/m/layers.1/self_attn/q_proj/MatMul_myl5_16 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 23   | __myl_ReshTranReshReplReshMove_myl5_17 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 24   | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_18 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 25   | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_19 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 26   | _gemm_mha_v2_myl5_20 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 27   | /m/layers.1/self_attn/o_proj/MatMul_myl5_21 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 28   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_22 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 29   | /m/layers.1/mlp/up_proj/MatMul+/m/layers.1/mlp/gate_proj/MatMul_myl5_23 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 30   | __myl_SiluMul_myl5_24 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 31   | /m/layers.1/mlp/down_proj/MatMul_myl5_25 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 32   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_26 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 33   | /m/layers.2/self_attn/v_proj/MatMul+/m/layers.2/self_attn/k_proj/MatMul+/m/layers.2/self_attn/q_proj/MatMul_myl5_27 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 34   | __myl_ReshTranReshReplReshMove_myl5_28 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 35   | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_29 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 36   | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_30 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 37   | _gemm_mha_v2_myl5_31 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 38   | /m/layers.2/self_attn/o_proj/MatMul_myl5_32 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 39   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_33 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 40   | /m/layers.2/mlp/up_proj/MatMul+/m/layers.2/mlp/gate_proj/MatMul_myl5_34 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 41   | __myl_SiluMul_myl5_35 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 42   | /m/layers.2/mlp/down_proj/MatMul_myl5_36 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 43   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_37 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 44   | /m/layers.3/self_attn/v_proj/MatMul+/m/layers.3/self_attn/k_proj/MatMul+/m/layers.3/self_attn/q_proj/MatMul_myl5_38 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 45   | __myl_ReshTranReshReplReshMove_myl5_39 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 46   | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_40 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 47   | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_41 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 48   | _gemm_mha_v2_myl5_42 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 49   | /m/layers.3/self_attn/o_proj/MatMul_myl5_43 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 50   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_44 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 51   | /m/layers.3/mlp/up_proj/MatMul+/m/layers.3/mlp/gate_proj/MatMul_myl5_45 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 52   | __myl_SiluMul_myl5_46 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 53   | /m/layers.3/mlp/down_proj/MatMul_myl5_47 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 54   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_48 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 55   | /m/layers.4/self_attn/v_proj/MatMul+/m/layers.4/self_attn/k_proj/MatMul+/m/layers.4/self_attn/q_proj/MatMul_myl5_49 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 56   | __myl_ReshTranReshReplReshMove_myl5_50 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 57   | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_51 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 58   | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_52 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 59   | _gemm_mha_v2_myl5_53 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 60   | /m/layers.4/self_attn/o_proj/MatMul_myl5_54 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 61   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_55 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 62   | /m/layers.4/mlp/up_proj/MatMul+/m/layers.4/mlp/gate_proj/MatMul_myl5_56 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 63   | __myl_SiluMul_myl5_57 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 64   | /m/layers.4/mlp/down_proj/MatMul_myl5_58 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 65   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_59 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 66   | /m/layers.5/self_attn/v_proj/MatMul+/m/layers.5/self_attn/k_proj/MatMul+/m/layers.5/self_attn/q_proj/MatMul_myl5_60 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 67   | __myl_ReshTranReshReplReshMove_myl5_61 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 68   | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_62 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 69   | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_63 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 70   | _gemm_mha_v2_myl5_64 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 71   | /m/layers.5/self_attn/o_proj/MatMul_myl5_65 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 72   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_66 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 73   | /m/layers.5/mlp/up_proj/MatMul+/m/layers.5/mlp/gate_proj/MatMul_myl5_67 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 74   | __myl_SiluMul_myl5_68 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 75   | /m/layers.5/mlp/down_proj/MatMul_myl5_69 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 76   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_70 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 77   | /m/layers.6/self_attn/v_proj/MatMul+/m/layers.6/self_attn/k_proj/MatMul+/m/layers.6/self_attn/q_proj/MatMul_myl5_71 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 78   | __myl_ReshTranReshReplReshMove_myl5_72 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 79   | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_73 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 80   | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_74 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 81   | _gemm_mha_v2_myl5_75 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 82   | /m/layers.6/self_attn/o_proj/MatMul_myl5_76 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 83   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_77 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 84   | /m/layers.6/mlp/up_proj/MatMul+/m/layers.6/mlp/gate_proj/MatMul_myl5_78 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 85   | __myl_SiluMul_myl5_79 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 86   | /m/layers.6/mlp/down_proj/MatMul_myl5_80 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 87   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_81 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 88   | /m/layers.7/self_attn/v_proj/MatMul+/m/layers.7/self_attn/k_proj/MatMul+/m/layers.7/self_attn/q_proj/MatMul_myl5_82 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 89   | __myl_ReshTranReshReplReshMove_myl5_83 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 90   | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_84 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 91   | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_85 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 92   | _gemm_mha_v2_myl5_86 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 93   | /m/layers.7/self_attn/o_proj/MatMul_myl5_87 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 94   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_88 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 95   | /m/layers.7/mlp/up_proj/MatMul+/m/layers.7/mlp/gate_proj/MatMul_myl5_89 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 96   | __myl_SiluMul_myl5_90 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 97   | /m/layers.7/mlp/down_proj/MatMul_myl5_91 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 98   | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_92 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 99   | /m/layers.8/self_attn/v_proj/MatMul+/m/layers.8/self_attn/k_proj/MatMul+/m/layers.8/self_attn/q_proj/MatMul_myl5_93 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 100  | __myl_ReshTranReshReplReshMove_myl5_94 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 101  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_95 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 102  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_96 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 103  | _gemm_mha_v2_myl5_97 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 104  | /m/layers.8/self_attn/o_proj/MatMul_myl5_98 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 105  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_99 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 106  | /m/layers.8/mlp/up_proj/MatMul+/m/layers.8/mlp/gate_proj/MatMul_myl5_100 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 107  | __myl_SiluMul_myl5_101 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 108  | /m/layers.8/mlp/down_proj/MatMul_myl5_102 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 109  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_103 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 110  | /m/layers.9/self_attn/v_proj/MatMul+/m/layers.9/self_attn/k_proj/MatMul+/m/layers.9/self_attn/q_proj/MatMul_myl5_104 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 111  | __myl_ReshTranReshReplReshMove_myl5_105 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 112  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_106 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 113  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_107 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 114  | _gemm_mha_v2_myl5_108 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 115  | /m/layers.9/self_attn/o_proj/MatMul_myl5_109 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 116  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_110 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 117  | /m/layers.9/mlp/up_proj/MatMul+/m/layers.9/mlp/gate_proj/MatMul_myl5_111 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 118  | __myl_SiluMul_myl5_112 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 119  | /m/layers.9/mlp/down_proj/MatMul_myl5_113 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 120  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_114 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 121  | /m/layers.10/self_attn/v_proj/MatMul+/m/layers.10/self_attn/k_proj/MatMul+/m/layers.10/self_attn/q_proj/MatMul_myl5_115 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 122  | __myl_ReshTranReshReplReshMove_myl5_116 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 123  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_117 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 124  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_118 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 125  | _gemm_mha_v2_myl5_119 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 126  | /m/layers.10/self_attn/o_proj/MatMul_myl5_120 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 127  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_121 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 128  | /m/layers.10/mlp/up_proj/MatMul+/m/layers.10/mlp/gate_proj/MatMul_myl5_122 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 129  | __myl_SiluMul_myl5_123 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 130  | /m/layers.10/mlp/down_proj/MatMul_myl5_124 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 131  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_125 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 132  | /m/layers.11/self_attn/v_proj/MatMul+/m/layers.11/self_attn/k_proj/MatMul+/m/layers.11/self_attn/q_proj/MatMul_myl5_126 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 133  | __myl_ReshTranReshReplReshMove_myl5_127 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 134  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_128 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 135  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_129 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 136  | _gemm_mha_v2_myl5_130 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 137  | /m/layers.11/self_attn/o_proj/MatMul_myl5_131 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 138  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_132 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 139  | /m/layers.11/mlp/up_proj/MatMul+/m/layers.11/mlp/gate_proj/MatMul_myl5_133 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 140  | __myl_SiluMul_myl5_134 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 141  | /m/layers.11/mlp/down_proj/MatMul_myl5_135 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 142  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_136 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 143  | /m/layers.12/self_attn/v_proj/MatMul+/m/layers.12/self_attn/k_proj/MatMul+/m/layers.12/self_attn/q_proj/MatMul_myl5_137 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 144  | __myl_ReshTranReshReplReshMove_myl5_138 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 145  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_139 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 146  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_140 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 147  | _gemm_mha_v2_myl5_141 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 148  | /m/layers.12/self_attn/o_proj/MatMul_myl5_142 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 149  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_143 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 150  | /m/layers.12/mlp/up_proj/MatMul+/m/layers.12/mlp/gate_proj/MatMul_myl5_144 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 151  | __myl_SiluMul_myl5_145 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 152  | /m/layers.12/mlp/down_proj/MatMul_myl5_146 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 153  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_147 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 154  | /m/layers.13/self_attn/v_proj/MatMul+/m/layers.13/self_attn/k_proj/MatMul+/m/layers.13/self_attn/q_proj/MatMul_myl5_148 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 155  | __myl_ReshTranReshReplReshMove_myl5_149 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 156  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_150 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 157  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_151 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 158  | _gemm_mha_v2_myl5_152 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 159  | /m/layers.13/self_attn/o_proj/MatMul_myl5_153 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 160  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_154 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 161  | /m/layers.13/mlp/up_proj/MatMul+/m/layers.13/mlp/gate_proj/MatMul_myl5_155 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 162  | __myl_SiluMul_myl5_156 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 163  | /m/layers.13/mlp/down_proj/MatMul_myl5_157 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 164  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_158 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 165  | /m/layers.14/self_attn/v_proj/MatMul+/m/layers.14/self_attn/k_proj/MatMul+/m/layers.14/self_attn/q_proj/MatMul_myl5_159 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 166  | __myl_ReshTranReshReplReshMove_myl5_160 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 167  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_161 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 168  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_162 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 169  | _gemm_mha_v2_myl5_163 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 170  | /m/layers.14/self_attn/o_proj/MatMul_myl5_164 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 171  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_165 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 172  | /m/layers.14/mlp/up_proj/MatMul+/m/layers.14/mlp/gate_proj/MatMul_myl5_166 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 173  | __myl_SiluMul_myl5_167 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 174  | /m/layers.14/mlp/down_proj/MatMul_myl5_168 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 175  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_169 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 176  | /m/layers.15/self_attn/v_proj/MatMul+/m/layers.15/self_attn/k_proj/MatMul+/m/layers.15/self_attn/q_proj/MatMul_myl5_170 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 177  | __myl_ReshTranReshReplReshMove_myl5_171 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 178  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_172 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 179  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_173 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 180  | _gemm_mha_v2_myl5_174 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 181  | /m/layers.15/self_attn/o_proj/MatMul_myl5_175 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 182  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_176 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 183  | /m/layers.15/mlp/up_proj/MatMul+/m/layers.15/mlp/gate_proj/MatMul_myl5_177 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 184  | __myl_SiluMul_myl5_178 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 185  | /m/layers.15/mlp/down_proj/MatMul_myl5_179 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 186  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_180 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 187  | /m/layers.16/self_attn/v_proj/MatMul+/m/layers.16/self_attn/k_proj/MatMul+/m/layers.16/self_attn/q_proj/MatMul_myl5_181 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 188  | __myl_ReshTranReshReplReshMove_myl5_182 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 189  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_183 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 190  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_184 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 191  | _gemm_mha_v2_myl5_185 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 192  | /m/layers.16/self_attn/o_proj/MatMul_myl5_186 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 193  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_187 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 194  | /m/layers.16/mlp/up_proj/MatMul+/m/layers.16/mlp/gate_proj/MatMul_myl5_188 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 195  | __myl_SiluMul_myl5_189 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 196  | /m/layers.16/mlp/down_proj/MatMul_myl5_190 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 197  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_191 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 198  | /m/layers.17/self_attn/v_proj/MatMul+/m/layers.17/self_attn/k_proj/MatMul+/m/layers.17/self_attn/q_proj/MatMul_myl5_192 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 199  | __myl_ReshTranReshReplReshMove_myl5_193 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 200  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_194 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 201  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_195 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 202  | _gemm_mha_v2_myl5_196 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 203  | /m/layers.17/self_attn/o_proj/MatMul_myl5_197 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 204  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_198 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 205  | /m/layers.17/mlp/up_proj/MatMul+/m/layers.17/mlp/gate_proj/MatMul_myl5_199 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 206  | __myl_SiluMul_myl5_200 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 207  | /m/layers.17/mlp/down_proj/MatMul_myl5_201 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 208  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_202 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 209  | /m/layers.18/self_attn/v_proj/MatMul+/m/layers.18/self_attn/k_proj/MatMul+/m/layers.18/self_attn/q_proj/MatMul_myl5_203 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 210  | __myl_ReshTranReshReplReshMove_myl5_204 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 211  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_205 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 212  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_206 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 213  | _gemm_mha_v2_myl5_207 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 214  | /m/layers.18/self_attn/o_proj/MatMul_myl5_208 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 215  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_209 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 216  | /m/layers.18/mlp/up_proj/MatMul+/m/layers.18/mlp/gate_proj/MatMul_myl5_210 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 217  | __myl_SiluMul_myl5_211 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 218  | /m/layers.18/mlp/down_proj/MatMul_myl5_212 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 219  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_213 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 220  | /m/layers.19/self_attn/v_proj/MatMul+/m/layers.19/self_attn/k_proj/MatMul+/m/layers.19/self_attn/q_proj/MatMul_myl5_214 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 221  | __myl_ReshTranReshReplReshMove_myl5_215 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 222  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_216 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 223  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_217 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 224  | _gemm_mha_v2_myl5_218 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 225  | /m/layers.19/self_attn/o_proj/MatMul_myl5_219 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 226  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_220 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 227  | /m/layers.19/mlp/up_proj/MatMul+/m/layers.19/mlp/gate_proj/MatMul_myl5_221 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 228  | __myl_SiluMul_myl5_222 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 229  | /m/layers.19/mlp/down_proj/MatMul_myl5_223 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 230  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_224 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 231  | /m/layers.20/self_attn/v_proj/MatMul+/m/layers.20/self_attn/k_proj/MatMul+/m/layers.20/self_attn/q_proj/MatMul_myl5_225 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 232  | __myl_ReshTranReshReplReshMove_myl5_226 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 233  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_227 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 234  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_228 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 235  | _gemm_mha_v2_myl5_229 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 236  | /m/layers.20/self_attn/o_proj/MatMul_myl5_230 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 237  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_231 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 238  | /m/layers.20/mlp/up_proj/MatMul+/m/layers.20/mlp/gate_proj/MatMul_myl5_232 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 239  | __myl_SiluMul_myl5_233 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 240  | /m/layers.20/mlp/down_proj/MatMul_myl5_234 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 241  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_235 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 242  | /m/layers.21/self_attn/v_proj/MatMul+/m/layers.21/self_attn/k_proj/MatMul+/m/layers.21/self_attn/q_proj/MatMul_myl5_236 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 243  | __myl_ReshTranReshReplReshMove_myl5_237 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 244  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_238 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 245  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_239 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 246  | _gemm_mha_v2_myl5_240 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 247  | /m/layers.21/self_attn/o_proj/MatMul_myl5_241 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 248  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_242 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 249  | /m/layers.21/mlp/up_proj/MatMul+/m/layers.21/mlp/gate_proj/MatMul_myl5_243 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 250  | __myl_SiluMul_myl5_244 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 251  | /m/layers.21/mlp/down_proj/MatMul_myl5_245 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 252  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_246 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 253  | /m/layers.22/self_attn/v_proj/MatMul+/m/layers.22/self_attn/k_proj/MatMul+/m/layers.22/self_attn/q_proj/MatMul_myl5_247 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 254  | __myl_ReshTranReshReplReshMove_myl5_248 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 255  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_249 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 256  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_250 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 257  | _gemm_mha_v2_myl5_251 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 258  | /m/layers.22/self_attn/o_proj/MatMul_myl5_252 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 259  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_253 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 260  | /m/layers.22/mlp/up_proj/MatMul+/m/layers.22/mlp/gate_proj/MatMul_myl5_254 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 261  | __myl_SiluMul_myl5_255 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 262  | /m/layers.22/mlp/down_proj/MatMul_myl5_256 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 263  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_257 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 264  | /m/layers.23/self_attn/v_proj/MatMul+/m/layers.23/self_attn/k_proj/MatMul+/m/layers.23/self_attn/q_proj/MatMul_myl5_258 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 265  | __myl_ReshTranReshReplReshMove_myl5_259 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 266  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_260 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 267  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_261 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 268  | _gemm_mha_v2_myl5_262 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 269  | /m/layers.23/self_attn/o_proj/MatMul_myl5_263 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 270  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_264 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 271  | /m/layers.23/mlp/up_proj/MatMul+/m/layers.23/mlp/gate_proj/MatMul_myl5_265 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 272  | __myl_SiluMul_myl5_266 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 273  | /m/layers.23/mlp/down_proj/MatMul_myl5_267 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 274  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_268 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 275  | /m/layers.24/self_attn/v_proj/MatMul+/m/layers.24/self_attn/k_proj/MatMul+/m/layers.24/self_attn/q_proj/MatMul_myl5_269 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 276  | __myl_ReshTranReshReplReshMove_myl5_270 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 277  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_271 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 278  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_272 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 279  | _gemm_mha_v2_myl5_273 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 280  | /m/layers.24/self_attn/o_proj/MatMul_myl5_274 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 281  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_275 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 282  | /m/layers.24/mlp/up_proj/MatMul+/m/layers.24/mlp/gate_proj/MatMul_myl5_276 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 283  | __myl_SiluMul_myl5_277 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 284  | /m/layers.24/mlp/down_proj/MatMul_myl5_278 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 285  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_279 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 286  | /m/layers.25/self_attn/v_proj/MatMul+/m/layers.25/self_attn/k_proj/MatMul+/m/layers.25/self_attn/q_proj/MatMul_myl5_280 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 287  | __myl_ReshTranReshReplReshMove_myl5_281 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 288  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_282 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 289  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_283 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 290  | _gemm_mha_v2_myl5_284 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 291  | /m/layers.25/self_attn/o_proj/MatMul_myl5_285 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 292  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_286 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 293  | /m/layers.25/mlp/up_proj/MatMul+/m/layers.25/mlp/gate_proj/MatMul_myl5_287 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 294  | __myl_SiluMul_myl5_288 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 295  | /m/layers.25/mlp/down_proj/MatMul_myl5_289 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 296  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_290 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 297  | /m/layers.26/self_attn/v_proj/MatMul+/m/layers.26/self_attn/k_proj/MatMul+/m/layers.26/self_attn/q_proj/MatMul_myl5_291 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 298  | __myl_ReshTranReshReplReshMove_myl5_292 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 299  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_293 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 300  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_294 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 301  | _gemm_mha_v2_myl5_295 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 302  | /m/layers.26/self_attn/o_proj/MatMul_myl5_296 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 303  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_297 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 304  | /m/layers.26/mlp/up_proj/MatMul+/m/layers.26/mlp/gate_proj/MatMul_myl5_298 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 305  | __myl_SiluMul_myl5_299 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 306  | /m/layers.26/mlp/down_proj/MatMul_myl5_300 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 307  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_301 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 308  | /m/layers.27/self_attn/v_proj/MatMul+/m/layers.27/self_attn/k_proj/MatMul+/m/layers.27/self_attn/q_proj/MatMul_myl5_302 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 309  | __myl_ReshTranReshReplReshMove_myl5_303 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 310  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_304 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 311  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_305 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 312  | _gemm_mha_v2_myl5_306 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 313  | /m/layers.27/self_attn/o_proj/MatMul_myl5_307 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 314  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_308 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 315  | /m/layers.27/mlp/up_proj/MatMul+/m/layers.27/mlp/gate_proj/MatMul_myl5_309 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 316  | __myl_SiluMul_myl5_310 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 317  | /m/layers.27/mlp/down_proj/MatMul_myl5_311 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 318  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_312 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 319  | /m/layers.28/self_attn/v_proj/MatMul+/m/layers.28/self_attn/k_proj/MatMul+/m/layers.28/self_attn/q_proj/MatMul_myl5_313 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 320  | __myl_ReshTranReshReplReshMove_myl5_314 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 321  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_315 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 322  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_316 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 323  | _gemm_mha_v2_myl5_317 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 324  | /m/layers.28/self_attn/o_proj/MatMul_myl5_318 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 325  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_319 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 326  | /m/layers.28/mlp/up_proj/MatMul+/m/layers.28/mlp/gate_proj/MatMul_myl5_320 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 327  | __myl_SiluMul_myl5_321 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 328  | /m/layers.28/mlp/down_proj/MatMul_myl5_322 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 329  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_323 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 330  | /m/layers.29/self_attn/v_proj/MatMul+/m/layers.29/self_attn/k_proj/MatMul+/m/layers.29/self_attn/q_proj/MatMul_myl5_324 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 331  | __myl_ReshTranReshReplReshMove_myl5_325 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 332  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_326 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 333  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_327 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 334  | _gemm_mha_v2_myl5_328 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 335  | /m/layers.29/self_attn/o_proj/MatMul_myl5_329 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 336  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_330 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 337  | /m/layers.29/mlp/up_proj/MatMul+/m/layers.29/mlp/gate_proj/MatMul_myl5_331 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 338  | __myl_SiluMul_myl5_332 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 339  | /m/layers.29/mlp/down_proj/MatMul_myl5_333 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 340  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_334 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 341  | /m/layers.30/self_attn/v_proj/MatMul+/m/layers.30/self_attn/k_proj/MatMul+/m/layers.30/self_attn/q_proj/MatMul_myl5_335 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 342  | __myl_ReshTranReshReplReshMove_myl5_336 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 343  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_337 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 344  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_338 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 345  | _gemm_mha_v2_myl5_339 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 346  | /m/layers.30/self_attn/o_proj/MatMul_myl5_340 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 347  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_341 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 348  | /m/layers.30/mlp/up_proj/MatMul+/m/layers.30/mlp/gate_proj/MatMul_myl5_342 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 349  | __myl_SiluMul_myl5_343 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 350  | /m/layers.30/mlp/down_proj/MatMul_myl5_344 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 351  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_345 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 352  | /m/layers.31/self_attn/v_proj/MatMul+/m/layers.31/self_attn/k_proj/MatMul+/m/layers.31/self_attn/q_proj/MatMul_myl5_346 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 353  | __myl_ReshTranReshReplReshMove_myl5_347 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 354  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_348 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 355  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_349 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 356  | _gemm_mha_v2_myl5_350 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 357  | /m/layers.31/self_attn/o_proj/MatMul_myl5_351 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 358  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_352 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 359  | /m/layers.31/mlp/up_proj/MatMul+/m/layers.31/mlp/gate_proj/MatMul_myl5_353 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 360  | __myl_SiluMul_myl5_354 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 361  | /m/layers.31/mlp/down_proj/MatMul_myl5_355 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 362  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_356 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 363  | /m/layers.32/self_attn/v_proj/MatMul+/m/layers.32/self_attn/k_proj/MatMul+/m/layers.32/self_attn/q_proj/MatMul_myl5_357 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 364  | __myl_ReshTranReshReplReshMove_myl5_358 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 365  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_359 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 366  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_360 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 367  | _gemm_mha_v2_myl5_361 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 368  | /m/layers.32/self_attn/o_proj/MatMul_myl5_362 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 369  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_363 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 370  | /m/layers.32/mlp/up_proj/MatMul+/m/layers.32/mlp/gate_proj/MatMul_myl5_364 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 371  | __myl_SiluMul_myl5_365 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 372  | /m/layers.32/mlp/down_proj/MatMul_myl5_366 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 373  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_367 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 374  | /m/layers.33/self_attn/v_proj/MatMul+/m/layers.33/self_attn/k_proj/MatMul+/m/layers.33/self_attn/q_proj/MatMul_myl5_368 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 375  | __myl_ReshTranReshReplReshMove_myl5_369 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 376  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_370 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 377  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_371 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 378  | _gemm_mha_v2_myl5_372 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 379  | /m/layers.33/self_attn/o_proj/MatMul_myl5_373 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 380  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_374 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 381  | /m/layers.33/mlp/up_proj/MatMul+/m/layers.33/mlp/gate_proj/MatMul_myl5_375 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 382  | __myl_SiluMul_myl5_376 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 383  | /m/layers.33/mlp/down_proj/MatMul_myl5_377 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 384  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_378 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 385  | /m/layers.34/self_attn/v_proj/MatMul+/m/layers.34/self_attn/k_proj/MatMul+/m/layers.34/self_attn/q_proj/MatMul_myl5_379 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 386  | __myl_ReshTranReshReplReshMove_myl5_380 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 387  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_381 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 388  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_382 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 389  | _gemm_mha_v2_myl5_383 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 390  | /m/layers.34/self_attn/o_proj/MatMul_myl5_384 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 391  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_385 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 392  | /m/layers.34/mlp/up_proj/MatMul+/m/layers.34/mlp/gate_proj/MatMul_myl5_386 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 393  | __myl_SiluMul_myl5_387 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 394  | /m/layers.34/mlp/down_proj/MatMul_myl5_388 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 395  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_389 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 396  | /m/layers.35/self_attn/v_proj/MatMul+/m/layers.35/self_attn/k_proj/MatMul+/m/layers.35/self_attn/q_proj/MatMul_myl5_390 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 397  | __myl_ReshTranReshReplReshMove_myl5_391 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 398  | __myl_ReshTranMulSlicNegSlicConcMulAddReshReplReshTranReshMove_myl5_392 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 399  | __myl_ReshTranMulSlicNegSlicConcMulAddReshMove_myl5_393 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 400  | _gemm_mha_v2_myl5_394 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 401  | /m/layers.35/self_attn/o_proj/MatMul_myl5_395 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 402  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_396 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 403  | /m/layers.35/mlp/up_proj/MatMul+/m/layers.35/mlp/gate_proj/MatMul_myl5_397 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 404  | __myl_SiluMul_myl5_398 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 405  | /m/layers.35/mlp/down_proj/MatMul_myl5_399 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 406  | __myl_AddCastMulMeanAddSqrtDivMulCastMul_myl5_400 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 407  | __myl_FcCast_myl5_401 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 408  | __myl_Slic_myl5_402 [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown
+    
+    Layer 409  | [trainStation3] [Op: Unknown]
+        {} -> {}
+        ---- Attributes ----
+        Origin = Unknown
+        Tactic = Unknown

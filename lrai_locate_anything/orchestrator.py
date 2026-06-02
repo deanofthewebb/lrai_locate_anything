@@ -614,7 +614,7 @@ class LocateAnythingRunner:
     # graph topology, etc.). Combined with the model-state hash to form the
     # full fingerprint, so engines built with old flags get wiped on next
     # auto_export even when the model weights haven't changed.
-    _ENGINE_BUILD_VERSION = "v3:bf16-llm-io+dual-decode"
+    _ENGINE_BUILD_VERSION = "v4:strongly-typed-bf16"
 
     def _model_fingerprint(self) -> str:
         """Stable hash of the in-memory model state PLUS the engine build version.
