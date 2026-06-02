@@ -1153,6 +1153,225 @@ class LocateAnythingRunner:
         lines.append(_top5(trt_last_logits, "TRT top5"))
         lines.append(_top5(pt_last_logits,  "PT  top5"))
 
+        # ============================================================
+        # MTP DECODE FORWARD (TRT decode_engine_mtp vs PT, per-position)
+        # ============================================================
+        # WHY: prefill cos_sim only tells us the last-real-token state. The
+        # failure mode (garbage at MTP positions 1..5, position 0 correct) lives
+        # in the MTP DECODE engine, NOT prefill. This block feeds the canonical
+        # MTP input — [last_real_token, mask, mask, mask, mask, mask] — through
+        # BOTH the TRT decode_engine_mtp AND PT model.language_model.model with
+        # the SAME prefill KV, then compares logits at every one of the BLOCK
+        # output positions.
+        #
+        # KV CACHE DTYPE FLOW (this is half of what we are verifying):
+        #   _prefill_trt returns `_trt_past` as raw engine outputs. Each entry's
+        #   numpy dtype is whatever the prefill engine's binding declared:
+        #     * BF16 binding -> np.uint16 (byte storage of bf16)
+        #     * FP16 binding -> np.float16
+        #   _decode_trt passes those buffers through verbatim. _coerce_input in
+        #   trt/engine.py enforces uint16 for BF16 bindings, so a dtype mismatch
+        #   between prefill output and decode input WOULD raise TypeError; if it
+        #   does NOT raise, the bytes line up.
+        #   For the PT path we route the SAME `_trt_past` through _kv_np_to_torch,
+        #   which detects uint16 (-> torch.bfloat16 zero-copy view -> REF_DTYPE)
+        #   vs fp16 numpy (-> astype float32 -> REF_DTYPE). This is the exact
+        #   conversion the orchestrator uses in _decode_pt today, so we are
+        #   exercising the canonical bridge.
+        #
+        # INTERPRETATION GUIDE — read signature as (mtp[0], mtp[1..5], ar[0]):
+        #
+        #   | ar[0] cos | mtp[0] cos | mtp[1..5] cos | Conclusion |
+        #   |---|---|---|---|
+        #   | >=0.99 | >=0.99 | <0.5      | mtp_attention_pattern_wrong (highest yield) |
+        #   | ~0.95  | ~0.95  | ~0.95     | trt_silent_fp16_downcast |
+        #   | broken/NaN | broken/NaN | broken/NaN | sample_tokens_dtype_path |
+        #   | <0.9   | <0.9   | <0.3      | KV bridge dtype/layout mismatch (kv_uint16_view_corruption) |
+        #   | >=0.99 | >=0.99 | >=0.99    | bug is in MTP loop bookkeeping, not engines |
+        #   | >=0.99 | <0.9   | >=0.99    | position-id decrement off-by-one on dup-last (new hypothesis) |
+        #
+        # A. mtp[0] high (>=0.99), mtp[1..5] LOW (<0.5), ar[0] high (>=0.99)
+        #    Confirms: mtp_attention_pattern_wrong — SDLM block-mask patch in
+        #    decode_engine_mtp is structurally wrong (update_causal_mask_for_one_gen_window_2d
+        #    patch constant-folded with wrong block_size, or modeling_qwen2.py:1279
+        #    AR arm baked under tracing when MTP arm was intended).
+        #    Refutes: trt_silent_fp16_downcast (would degrade ar[0] equally),
+        #    kv_uint16_view_corruption (would degrade mtp[0] too — same KV),
+        #    visual_feature_scatter_position (prefill-side), sample_tokens_dtype_path.
+        #    Action: dump engine layer precisions; re-export with explicit
+        #    text_mask_token_id at trace position; verify LLMDecode.k_trace ==
+        #    text_config.block_size + 1.
+        #
+        # B. mtp[0..5] uniformly degraded (~0.94-0.97 everywhere), ar[0] similarly degraded
+        #    Confirms: trt_silent_fp16_downcast — uniform precision loss across all
+        #    positions and both engines. Matches prefill 0.945 envelope (~0.2%/layer × 28).
+        #    Refutes: mtp_attention_pattern_wrong (would NOT touch ar[0]),
+        #    kv_uint16_view_corruption (would worsen with depth — mtp[5] > mtp[1]),
+        #    sample_tokens_dtype_path (would corrupt to integer-code-shaped values).
+        #    Action: polygraphy inspect model decode_engine_mtp.engine --show-layer-precisions;
+        #    rebuild with STRONGLY_TYPED or OBEY_PRECISION_CONSTRAINTS.
+        #
+        # C. mtp[0..5] in [-1, 0] range or NaN/Inf in TRT mtp_logits, ar[0] also broken
+        #    Confirms: sample_tokens_dtype_path — _logits_to_torch_float is
+        #    bf16-viewing what is actually fp32 bytes.
+        #    Discriminator: _stats min/max sane in PT (~±20) and garbage in TRT
+        #    (~±1e-30 or ~±1e10). try/except will catch view shape error.
+        #    Action: print decode_engine.is_bf16['logits'] and dtype['logits'];
+        #    verify LLMDecode.forward .float() cast survived export.
+        #
+        # D. mtp[0] low (<0.9), mtp[1..5] very low (<0.3), ar[0] low (<0.9)
+        #    Confirms: kv_uint16_view_corruption OR prefill KV dtype mismatch at
+        #    prefill->decode boundary. Both decode engines query SAME _trt_past.
+        #    Cross-check: print prefill_engine.is_bf16['present_k_0'] vs
+        #    decode_engine.is_bf16['past_k_0'] vs decode_engine_ar.is_bf16['past_k_0'].
+        #    Adversarial: if _decode_trt did NOT raise, _coerce_input accepted
+        #    dtype, so bindings AGREE — likely layout/stride (K/V time dim,
+        #    head dim mis-permuted). Add _stats on _trt_past[0] vs pt_past[0][0].
+        #
+        # E. mtp[0..5] high (>=0.99) everywhere, ar[0] high (>=0.99), but generation garbage
+        #    Confirms: bug downstream — MTP token-sampling loop (orchestrator.py:329-352),
+        #    KV truncation/append between MTP rounds (orchestrator.py:381), or
+        #    sample_tokens itself.
+        #    Action: add a SECOND MTP iteration — feed truncated/appended past
+        #    from round 1, compare round-2 logits to PT canonical MTP loop.
+        #
+        # F. mtp[0] LOW (<0.9), mtp[1..5] high (>=0.99)
+        #    Confirms: position-id off-by-one on duplicate-last slot. pos[:, -BLOCK:] -= 1
+        #    (orchestrator.py:324) acts on ALL BLOCK positions including position 0;
+        #    if engine traced expecting decrement only on positions 1..BLOCK-1, position 0
+        #    queries wrong RoPE. Promotes a new hypothesis.
+        #
+        # G. mtp[1..5] PT top-1 are coord/box tokens (<203>, <box>) and TRT top-1
+        #    are unrelated structural tokens (<im_end>, punctuation)
+        #    Strengthens: mtp_attention_pattern_wrong — mask positions attending
+        #    to WRONG KV slice; likely [-block_size:, -block_size-1] = -inf patch
+        #    missing in engine (masks attend to duplicate-last = previous round's
+        #    already-committed token). "Right magnitudes, wrong attention pattern".
+        if self.decode_engine is None:
+            lines.append("")
+            lines.append("# MTP DECODE diagnostic SKIPPED (decode_engine not loaded)")
+        else:
+            BLOCK = int(self.config.text_config.block_size)
+            MASK_ID = int(self.config.text_config.text_mask_token_id)
+            P = int(ids_np.shape[1])  # prompt length == prefill KV time dim
+
+            # Pick the "last real token". Use the prefill TRT top-1 (matches
+            # what the generate loop would actually commit). Falls back to the
+            # last prompt token if argmax is junk.
+            last_tok = int(torch.argmax(trt_last_logits).item())
+
+            # Canonical MTP input — mirrors orchestrator.py:320-325 exactly.
+            mtp_ids = np.concatenate([
+                np.array([[last_tok]], dtype=np.int64),
+                np.full((1, BLOCK - 1), MASK_ID, dtype=np.int64),
+            ], axis=1)                                        # (1, BLOCK)
+            mtp_pos = np.arange(P, P + BLOCK, dtype=np.int64)[None, :]
+            mtp_pos[:, -BLOCK:] -= 1                          # position trick
+            mtp_att = np.ones((1, P + BLOCK), dtype=np.int64)
+
+            # ---- TRT decode_engine_mtp ----
+            # `_trt_past` is whatever dtype the prefill engine emitted. The
+            # decode_engine_mtp's _coerce_input WILL raise if the dtypes do not
+            # match its bindings, so reaching the output line means the
+            # KV bridge between the two engines is at least byte-consistent.
+            try:
+                trt_mtp_logits_o, _trt_mtp_next = self._gen._decode_trt(
+                    mtp_ids, mtp_pos, mtp_att, _trt_past, branch="mtp",
+                )
+                trt_mtp_logits = self._gen._logits_to_torch_float(trt_mtp_logits_o)  # (1, BLOCK, V)
+            except Exception as e:
+                lines.append("")
+                lines.append(f"# MTP DECODE TRT FAILED: {type(e).__name__}: {e}")
+                trt_mtp_logits = None
+
+            # ---- PT model.language_model.model with prefill KV ----
+            # Convert the SAME `_trt_past` (uint16/fp16 numpy) to torch via the
+            # orchestrator's _kv_np_to_torch — this is the canonical bridge.
+            with torch.inference_mode():
+                pt_past = tuple(
+                    (self._gen._kv_np_to_torch(_trt_past[2 * j]),
+                     self._gen._kv_np_to_torch(_trt_past[2 * j + 1]))
+                    for j in range(self.n_layers)
+                )
+                pt_mtp_out = self.model.language_model.model(
+                    input_ids=torch.from_numpy(mtp_ids).to(self.model.device),
+                    position_ids=torch.from_numpy(mtp_pos).to(self.model.device),
+                    attention_mask=torch.from_numpy(mtp_att).to(self.model.device),
+                    past_key_values=pt_past,
+                    use_cache=True, return_dict=True,
+                )
+                pt_mtp_logits = self.model.language_model.lm_head(
+                    pt_mtp_out.last_hidden_state
+                ).float().cpu()                              # (1, BLOCK, V)
+
+            lines.append("")
+            lines.append(f"[MTP DECODE forward — input = [tok={last_tok}, mask×{BLOCK-1}]  "
+                         f"P={P}  positions={mtp_pos.tolist()[0]}]")
+            if trt_mtp_logits is not None:
+                lines.append(_stats("TRT mtp_logits", trt_mtp_logits))
+            lines.append(_stats("PT  mtp_logits", pt_mtp_logits))
+
+            # Per-position comparison (this is the discriminator)
+            if trt_mtp_logits is not None:
+                for k in range(BLOCK):
+                    a = trt_mtp_logits[0, k]
+                    b = pt_mtp_logits[0, k]
+                    role = "dup_last" if k == 0 else f"mask_{k}"
+                    lines.append(_compare(f"mtp[{k}] {role}", a, b))
+                    lines.append("  " + _top5(a, f"  TRT mtp[{k}] top5"))
+                    lines.append("  " + _top5(b, f"  PT  mtp[{k}] top5"))
+
+            # ============================================================
+            # AR DECODE FORWARD (TRT decode_engine_ar vs PT, single position)
+            # ============================================================
+            # Same prefill KV, but input_ids = [last_tok] only (no mask). This
+            # exercises the engine traced through the modeling_qwen2.py:1279
+            # AR early-return branch. If decode_ar disagrees with PT we know
+            # the AR engine is broken too; if it agrees we have isolated the
+            # bug to the SDLM block-mask path in decode_engine_mtp.
+            if self.decode_engine_ar is not None:
+                ar_ids = np.array([[last_tok]], dtype=np.int64)
+                ar_pos = np.array([[P]], dtype=np.int64)
+                ar_att = np.ones((1, P + 1), dtype=np.int64)
+                try:
+                    trt_ar_logits_o, _ = self._gen._decode_trt(
+                        ar_ids, ar_pos, ar_att, _trt_past, branch="ar",
+                    )
+                    trt_ar_logits = self._gen._logits_to_torch_float(trt_ar_logits_o)
+                except Exception as e:
+                    lines.append("")
+                    lines.append(f"# AR DECODE TRT FAILED: {type(e).__name__}: {e}")
+                    trt_ar_logits = None
+
+                with torch.inference_mode():
+                    pt_past2 = tuple(
+                        (self._gen._kv_np_to_torch(_trt_past[2 * j]),
+                         self._gen._kv_np_to_torch(_trt_past[2 * j + 1]))
+                        for j in range(self.n_layers)
+                    )
+                    pt_ar_out = self.model.language_model.model(
+                        input_ids=torch.from_numpy(ar_ids).to(self.model.device),
+                        position_ids=torch.from_numpy(ar_pos).to(self.model.device),
+                        attention_mask=torch.from_numpy(ar_att).to(self.model.device),
+                        past_key_values=pt_past2,
+                        use_cache=True, return_dict=True,
+                    )
+                    pt_ar_logits = self.model.language_model.lm_head(
+                        pt_ar_out.last_hidden_state
+                    ).float().cpu()
+
+                lines.append("")
+                lines.append(f"[AR DECODE forward — input = [tok={last_tok}]  P={P}]")
+                if trt_ar_logits is not None:
+                    lines.append(_stats("TRT ar_logits", trt_ar_logits))
+                    lines.append(_compare("ar[0]", trt_ar_logits[0, 0], pt_ar_logits[0, 0]))
+                    lines.append("  " + _top5(trt_ar_logits[0, 0], "  TRT ar[0] top5"))
+                lines.append(_stats("PT  ar_logits", pt_ar_logits))
+                lines.append("  " + _top5(pt_ar_logits[0, 0], "  PT  ar[0] top5"))
+            else:
+                lines.append("")
+                lines.append("# AR DECODE diagnostic SKIPPED (decode_engine_ar not loaded)")
+
         return "\n".join(lines) + "\n"
 
     def diagnose(self, image, prompt: str = "Locate all the instances that matches the following description: cats.",
