@@ -42,21 +42,25 @@ There is **no `IIfConditional` in the TRT-LLM engine graph**. The codegen-level 
 
 ## Final Artifact Set
 
-Canonical TRT-LLM multimodal layout (two engines, one parent dir):
+Canonical TRT-LLM multimodal layout — **three engines, ALL TRT-LLM 10.9** (no separate `vision_proj.engine`, no TRT 10.16 dependency):
 
 ```
 lrai_locate_anything_trtllm/
 ├── vision/
-│   └── vision_proj.engine        ~2.0 GB   TRT 10.16, our Phase-1 MoonViT+projector, UNCHANGED
+│   └── vision_encoder.engine     ~2.0 GB   TRT-LLM 10.9, MoonViT ported via build_multimodal_engine.py
 └── llm/
-    ├── llm.engine                ~6.0 GB   TRT-LLM, Qwen2.5-3B body (152681 vocab)
+    ├── llm.bf16.engine           ~6.0 GB   TRT-LLM 10.9, Qwen2.5-3B bf16, via trtllm-build
+    ├── llm.int4.engine           ~2.0 GB   TRT-LLM 10.9, Qwen2.5-3B int4 weight-only,
+    │                                       via trtllm-build --use_weight_only --weight_only_precision int4
     ├── config.json               ~ 8 KB    TRT-LLM engine config (paged_kv, dtype, plugins)
-    └── rank0.engine -> llm.engine          symlink for single-rank load
+    └── rank0.engine -> llm.<dtype>.engine  symlink chosen at deploy time
 ```
 
-**Total: ~8.0 GB.** Matches the original Phase-2 target (`single_file_trt_design.md` §3.2).
+Optional: a separate `visual_features` projection engine if the ported MoonViT template doesn't expose a built-in projector to LLM hidden dim (decided in D.1/D.2).
 
-Distribution: both files uploaded to `s3://data-labeling.livereachmedia.com/datasets/safetunnel/models/locany_trtllm/` (mirroring the SAM3 pattern — do NOT use `s3://trackerbot/`, AccessDenied).
+**Total: ~10 GB combined across both quantization variants** (the bf16 and int4 LLM engines coexist on disk; only one is loaded per process). Single TRT-LLM 10.9 runtime end-to-end.
+
+Distribution: all files uploaded to `s3://data-labeling.livereachmedia.com/datasets/safetunnel/models/locany_trtllm/` (mirroring the SAM3 pattern — do NOT use `s3://trackerbot/`, AccessDenied).
 
 ---
 
@@ -182,26 +186,47 @@ Concrete tasks:
 
 ---
 
-### Phase D — Vision encoder integration (3–4 days, **medium-large**, risk: high)
+### Phase D — MoonViT port to TRT-LLM `build_multimodal_engine.py` (10–15 days, **xlarge**, risk: high)
 
-**Deliverable:** `trtllm_prod/moonvit_adapter.py` bridges our `vision_proj.engine` output into TRT-LLM's `prompt_embedding_table` input contract.
+**Deliverable:** `vision_encoder.engine` (~2 GB) built natively via TRT-LLM tooling — single TRT 10.9 runtime, no dual-runtime split.
 
-**Decision (final):** Keep our existing `vision_proj.engine`. Do NOT use `build_multimodal_engine.py`.
+**Decision (final, 2026-06-03):** PORT MoonViT into TRT-LLM's `build_multimodal_engine.py` pattern. Do NOT keep the dual-runtime `vision_proj.engine` (TRT 10.16) + adapter.
 
 Rationale:
-- TRT-LLM's `build_multimodal_engine.py --model_type qwen2_vl` hardcodes the standard Qwen ViT (window attention + RoPE, sm-flow 14x14 grid). LocateAnything's **MoonViT** is structurally different (different patch grid, different RoPE, different projector). Forcing it through that script would mean a one-off fork.
-- We already have `vision_proj.engine` working from Phase 1 — output is `[1, 256, 2048]` bf16, already projected into LLM hidden dim.
-- The runner-side contract is purely tensor-shape: any TRT engine that outputs `[B*N, H]` (or is reshapable to that) where `H == llm.hidden_size` is acceptable. This is documented in `tensorrt_llm/runtime/multimodal_model_runner.py` — vision engines are loaded via generic `Session.from_serialized_engine(buf)`, no TRT-LLM-specific metadata.
+- A single TRT 10.9 runtime end-to-end eliminates R5 (cross-version deserialization risk) and the launcher's `LD_LIBRARY_PATH` juggling.
+- Long-term maintenance is cleaner: one toolchain, one engine-build script, one parity surface per quantization mode.
+- Cost is upfront: we have to translate MoonViT's custom ops (Rope2DReal, sdpa_packed without `cu_seqlens`, grid_hws baking, patch_merger static reshape) into a TRT-LLM-native template.
 
-Concrete tasks:
-1. `moonvit_adapter.py`: wraps `vision_proj.engine` via `tensorrt.Runtime` + `Session`. Runs forward, returns `visual_features.reshape(N, H)` as a contiguous CUDA tensor.
-2. Verify output shape `[256, 2048]` matches `max_multimodal_len=256` from Phase C build.
-3. PT-parity test: same image → MoonViT (PT) → projector (PT) vs same image → `vision_proj.engine` → reshape. `torch.testing.assert_close(atol=0.05, rtol=0.05)` on bf16 features. (Looser than the TRT-LLM unit-test atol=0.4 because we are testing the vision half in isolation, on a known-good engine from Phase 1.)
-4. Build a small fixture: `tests/fixtures/lane_axis_frame_001.jpg` + golden `visual_features_pt.npy`.
+Concrete sub-deliverables:
 
-**Gate:** Cos-sim ≥ 0.995 between PT visual features and engine visual features on the fixture image.
+- **D.1 — Template audit.** Read TRT-LLM's vision encoder templates: CLIP, SigLIP, Qwen2-VL ViT, InternVL ViT. Pick the closest base (likely InternVL or Qwen2-VL — both are MoonViT-adjacent). Output: short comparison note + selected base in `trtllm_prod/vision/BASE.md`.
 
-**Risk:** Phase-1 fusion may have baked-in a projector output dim that doesn't exactly match Qwen2.5-3B's `hidden_size=2048`. Verify on day 1, fall back to inserting a thin Python projector in `moonvit_adapter.py` if so. (See Risk R3.)
+- **D.2 — Port MoonViT's custom patches into the chosen template.** Translate:
+  - `Rope2DReal` position embeddings (swap from `Rope2DPosEmb`)
+  - `sdpa_packed` without `cu_seqlens` (TRT-LLM defaults to cu_seqlens; need an explicit non-cu_seqlens path or weight-bake)
+  - `grid_hws` baking (constant tensor, our canonical `(36, 46)`)
+  - `patch_merger` static reshape (the Phase 1 work — `[N, H]` → `[N/4, 4*H]` → `[N/4, H_out]`)
+
+- **D.3 — Weight-name compatibility.** TRT-LLM expects specific naming for vision encoders (e.g. `vision_model.encoder.layers.{i}.self_attn.{q,k,v}_proj.weight`). Our MoonViT uses different conventions. Build a name-mapping table; verify every weight loads with no missing/unexpected keys.
+
+- **D.4 — Convert + build.** Run TRT-LLM's tooling:
+  ```
+  python <trtllm>/examples/models/core/multimodal/build_multimodal_engine.py \
+    --model_type <chosen_base> \
+    --model_path /tmp/moonvit_hf \
+    --output_dir <out>/vision_encoder \
+    --max_batch_size 1 \
+    --dtype bfloat16
+  ```
+  Output: `vision_encoder.engine` (~2 GB), `config.json`.
+
+- **D.5 — Parity test (PT vs TRT-LLM vision encoder).** Same image → MoonViT (PT) vs same image → `vision_encoder.engine`. `torch.testing.assert_close(atol=1e-2, rtol=1e-2)` on bf16 features. Build fixture: `tests/fixtures/lane_axis_frame_001.jpg` + golden `visual_features_pt.npy`. Cos-sim ≥ 0.995 required.
+
+**Gate:** D.5 cos-sim ≥ 0.995 AND all 256×2048 features match within atol=1e-2.
+
+**Effort:** 10–15 days (vs 3–4 days for the adapter path). Net project estimate: **24–33 days** (was 17–22).
+
+**Risk:** Custom-op porting (R3.1) is the dominant unknown. If Rope2DReal or sdpa_packed don't translate cleanly to TRT-LLM's vision encoder template, we may need custom plugins or weight pre-baking. See Risk R3 / R3.1.
 
 ---
 
@@ -304,19 +329,30 @@ Test infrastructure follows the TRT-LLM upstream pattern (`tests/unittest/_torch
 
 ---
 
-## Open Decisions for User
+## Open Decisions for User — RESOLVED 2026-06-03
 
-These must be resolved **before Phase B starts**:
+All five decisions are locked in. Recorded here for traceability.
 
-1. **Quantization target.** bf16 only (matches current PT path, simplest parity), or also int4 weight-only (`--use_weight_only --weight_only_precision int4`) for the Colab tier? Int4 cuts `llm.engine` from ~6 GB to ~2 GB and roughly doubles throughput but introduces a second parity surface to test. **Recommendation: bf16 only for v1, defer int4 to v2.**
+1. **Quantization target.** bf16 only (matches current PT path, simplest parity), or also int4 weight-only (`--use_weight_only --weight_only_precision int4`) for the Colab tier? Int4 cuts `llm.engine` from ~6 GB to ~2 GB and roughly doubles throughput but introduces a second parity surface to test. **DECISION (2026-06-03): bf16 + int4 weight-only. Build BOTH engines; Phase F tests both parity surfaces.**
 
-2. **Multi-GPU build.** Single GPU on learn02 (3080 Ti, `--tp_size 1`) or multi-rank if Colab Pro offers 2x L4? **Recommendation: single GPU. TP=2 doubles the build-and-test matrix for a model that already fits in 24 GB.**
+2. **Multi-GPU build.** Single GPU on learn02 (3080 Ti, `--tp_size 1`) or multi-rank if Colab Pro offers 2x L4? **DECISION (2026-06-03): single GPU `--tp_size 1`.**
 
-3. **MTP (multi-token prediction) future.** Drop entirely in the TRT-LLM path (cleanest), or re-implement via TRT-LLM's Medusa speculative-decoding head (more code but preserves the 1.5–2x speculative speedup we had in PT)? **Recommendation: drop for v1, file a v2 ticket. Medusa requires training extra heads — out of scope for this migration.**
+3. **MTP (multi-token prediction) future.** Drop entirely in the TRT-LLM path (cleanest), or re-implement via TRT-LLM's Medusa speculative-decoding head (more code but preserves the 1.5–2x speculative speedup we had in PT)? **DECISION (2026-06-03): drop MTP / Medusa entirely in v1. Not even filing a v2 ticket — revisit only if measured throughput is insufficient.**
 
-4. **Vision encoder ownership.** Confirmed in Phase D plan: keep our `vision_proj.engine`, do NOT use `build_multimodal_engine.py`. **Please confirm — this is load-bearing for the Phase D plan.**
+4. **Vision encoder ownership.** Adapter path (keep `vision_proj.engine`, write a thin reshape adapter) or port MoonViT into TRT-LLM's `build_multimodal_engine.py` pattern (single TRT 10.9 runtime, no dual-runtime split)? **DECISION (2026-06-03): PORT MoonViT to TRT-LLM `build_multimodal_engine.py` pattern. Reverse-engineer MoonViT into TRT-LLM's vision encoder template (CLIP/SigLIP/InternVL-style base). Single TRT 10.9 runtime end-to-end. Phase D is re-scoped accordingly (see below).**
 
-5. **TRT version isolation strategy.** Use a dedicated `~/venvs/trtllm/` venv with TRT 10.9, leaving system TRT 10.16 intact for YOLOv12 + Phase-1 `vision_proj.engine`? Or attempt a TRT-LLM source build against TRT 10.16 (officially unsupported, may not compile)? **Recommendation: isolated venv. Source build adds 3+ days of unknowns.**
+5. **TRT version isolation strategy.** Use a dedicated `~/venvs/trtllm/` venv with TRT 10.9, leaving system TRT 10.16 intact for YOLOv12 + Phase-1 `vision_proj.engine`? Or attempt a TRT-LLM source build against TRT 10.16 (officially unsupported, may not compile)? **DECISION (2026-06-03): isolated `~/venvs/trtllm/` venv with TRT 10.9. System TRT 10.16 stays intact.**
+
+---
+
+## Phase D Sub-decisions (Phase B can start before these are answered)
+
+These are specific to the MoonViT port path (Decision #4 above). They do NOT block Phase A/B/C, which are pure LM-body work.
+
+- **D-sub-1: Base template choice.** Which TRT-LLM vision encoder template do we fork as the base — CLIP, SigLIP, Qwen2-VL ViT, or InternVL ViT? Initial lean: InternVL or Qwen2-VL since both are MoonViT-adjacent (similar patch_merger structure, Rope-style positional encoding). Decide by end of Phase C.
+- **D-sub-2: Grid mode.** Ship MoonViT baked at the canonical `(36, 46)` grid only (matches Phase 1 fusion contract), or expose dynamic grid support? Static is simpler and matches our deployment pattern (lane-axis frames are constant resolution). Recommendation pending: static.
+- **D-sub-3: Patch + merge dimensions.** TRT-LLM's vision encoder templates typically assume `patch_size=14` + `merge_kernel=2` (Qwen2-VL ViT convention) — does our MoonViT match exactly? If not, do we extend the template or pre-process inputs to fit?
+- **D-sub-4: Custom op coverage.** Do `Rope2DReal` position embeddings and `sdpa_packed` (without `cu_seqlens`) have direct TRT-LLM equivalents? If not, do we add custom plugins or fall back to PT-side equivalents pre-baked into weights? (See Risk R3.1.)
 
 ---
 
@@ -335,21 +371,28 @@ These must be resolved **before Phase B starts**:
 - **Mitigation:** Phase-B day-1 task is the weight round-trip test (atol=0, rtol=0). If `lm_head` shape is wrong, fork the convert script (~50 lines), don't try to patch upstream.
 - **Related history:** `project_locateanything_lm_head_root_cause.md` — vendor skips `post_init` → `tie_weights` never runs → random `lm_head`. Verify the HF checkpoint's `lm_head` is the trained one BEFORE running convert. (Our existing repair shim does this; lift the same check into `convert.py`.)
 
-### R3 — MoonViT integration may surface feature-shape mismatches
-**Severity: medium. Likelihood: low (we have Phase-1 evidence it's `[1, 256, 2048]`).**
-- TRT-LLM's `prompt_embedding_table` expects `[N, H]` where `H == llm.hidden_size = 2048`.
-- Our Phase-1 `vision_proj.engine` outputs `[1, 256, 2048]` (verified in `learn02_polygraphy_summary.log`).
-- **Mitigation:** Day-1 of Phase D verifies the contract empirically. If misaligned, insert a Python `nn.Linear` projector in `moonvit_adapter.py` (no engine rebuild needed for v1).
+### R3 — MoonViT port to TRT-LLM template may surface structural mismatches
+**Severity: high. Likelihood: medium.** (Upgraded from medium / low after the 2026-06-03 decision to port rather than adapt — we are now rewriting MoonViT inside TRT-LLM's vision encoder template, not bridging shapes around a known-good engine.)
+- TRT-LLM's vision encoder templates (CLIP, SigLIP, Qwen2-VL ViT, InternVL ViT) each impose conventions on patch_size, merge_kernel, positional encoding type, and attention masking that may not match MoonViT exactly.
+- Our Phase-1 evidence (`[1, 256, 2048]` output) tells us the *contract* matches, but does not tell us whether the internal ops translate cleanly.
+- **Mitigation:** D.1 template audit is a hard gate before D.2 starts. If no template is within ~80% structural fit, escalate before sinking days into D.2.
+
+### R3.1 — MoonViT custom-op porting risk (Rope2DReal + sdpa_packed)
+**Severity: high. Likelihood: medium-high.** (New risk, added 2026-06-03 with Phase D re-scope.)
+- MoonViT uses `Rope2DReal` position embeddings (not the `Rope2DPosEmb` variant TRT-LLM ships) and `sdpa_packed` without `cu_seqlens` (TRT-LLM's default attention path assumes `cu_seqlens`).
+- These ops may not have direct TRT-LLM equivalents. Options if they don't:
+  1. Add custom TRT plugins (high effort, requires C++/CUDA work)
+  2. Pre-bake the positional encoding into weights at convert time (lossy if dynamic grid is needed)
+  3. Fall back to PT-side equivalents wrapping the TRT-LLM engine (defeats the point of the port)
+- **Mitigation:** D.2 explicitly schedules a custom-op feasibility spike on day 1. If neither option (1) nor (2) is viable within 3 days, escalate.
 
 ### R4 — learn02 GPU 1 (~12 GB) may be too tight for the build
 **Severity: medium. Likelihood: medium.**
 - `trtllm-build` peak VRAM is roughly 2× final engine size during the optimization phase. For a 6 GB engine, that's 12 GB — right at GPU 1's limit.
 - **Mitigation:** Pre-clear GPU 1 (`fuser -k /dev/nvidia1`), build with `--workers 1`, and if OOM, fall back to Colab L4 (24 GB). The output engine is portable across sm_86 (3080) and sm_89 (L4) — both Ampere/Ada and TRT-LLM build is GPU-agnostic for compute capability inference. **However:** TRT engines are tied to compute capability. Build on sm_89 L4 → won't load on sm_86 3080. Confirm whether `trtllm-build` produces a multi-arch engine or whether we need separate builds. **Action: research before Phase C, treat as a sub-gate.**
 
-### R5 — Phase-1 `vision_proj.engine` was built against TRT 10.16
-**Severity: low. Likelihood: low.**
-- Vision engine runs in the *system* TRT 10.16 path (separate from TRT-LLM's bundled 10.9). The TRT-LLM runner loads `vision_proj.engine` via the venv's TRT (10.9), which may refuse to deserialize a 10.16-serialized engine.
-- **Mitigation:** TRT engines are forward-compatible within a major version (10.x). Test on Phase-D day-1: deserialize 10.16 engine inside the 10.9 venv. If it fails, rebuild `vision_proj.engine` against TRT 10.9 (a one-time operation; the source code from Phase 1 is preserved).
+### R5 — [DELETED 2026-06-03]
+Previously: "Phase-1 `vision_proj.engine` was built against TRT 10.16, may not deserialize in TRT-LLM 10.9 venv." **Obsolete** under the 2026-06-03 port decision — `vision_proj.engine` is no longer in the deployment. The new `vision_encoder.engine` is built natively in TRT-LLM 10.9 via `build_multimodal_engine.py`, so there is no cross-version deserialization surface. Risk eliminated by design.
 
 ### R6 — Speculation discipline
 Per `feedback_speculation_discipline.md`: this design doc cites only verified TRT-LLM behavior (release notes v1.2.1, recipe `examples/models/core/qwen/`, runner code `tensorrt_llm/runtime/multimodal_model_runner.py`, unit-test `test_modeling_qwen.py`). Any item not directly sourced from those is flagged here:
