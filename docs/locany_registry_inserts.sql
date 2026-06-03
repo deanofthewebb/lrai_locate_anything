@@ -67,3 +67,14 @@ VALUES
  'locany.llm_decode.poc',
  '{"detector_options": {"kind": "locateanything_llm_decode_mtp", "max_new_tokens": 128, "temperature": 0.7, "top_p": 0.9, "repetition_penalty": 1.1, "block_size": 6}}',
  0, '', '', '{"kind": "detect"}', NULL, NULL);
+
+INSERT INTO `ml_models` (`model_id`, `location`, `config`, `model_type`, `created`, `updated`, `description`, `model_alias`, `default_parameters`, `training_id`, `engine_path`, `int8_cache`, `mapping`, `onnx`, `huggingface_repo`)
+VALUES
+('locany.llm_unified.poc.onnx',
+ 's3://ml.livereachmedia.com/onnx/locany/locany.llm_unified.poc.onnx.data',
+ 's3://ml.livereachmedia.com/onnx/locany/locany.llm_unified.poc.onnx',
+ 'onnx', '2026-06-03 10:00:00', '2026-06-03 10:00:00',
+ 'LocateAnything-3B unified LLM (prefill + AR decode merged via onnx-graphsurgeon If-node on use_cache_branch BOOL input; Qwen2.5-3B body, bf16). Single shared weight set (5.9 GB vs 11.6 GB for the separate prefill+decode_ar pair). MTP/SDLM branch dropped. Smoke-tested in onnxruntime CUDA EP. NOT compatible with TRT 10 IIfConditional build (data-dependent shapes in subgraphs); ship via onnxruntime-genai or as a backup artifact while TRT-LLM adoption proceeds. Consumer: rename the downloaded .onnx.data to llm_unified.bin (the ONNX graph''s hard-coded external_data reference) so onnxruntime can load the external weights.',
+ 'locany.llm_unified.poc',
+ '{"detector_options": {"kind": "locateanything_llm_unified", "vision_model_id": "locany.vision.poc.onnx", "projector_model_id": "locany.projector.poc.onnx", "use_cache_branch_input": "use_cache_branch", "n_layers": 36, "hidden_size": 2048, "n_kv_heads": 2, "head_dim": 128, "image_token_id": 151665, "box_start_token": 151666, "box_end_token": 151668, "eos_token": 151645, "runtime": "onnxruntime-genai", "max_new_tokens": 128, "temperature": 0.7, "top_p": 0.9, "repetition_penalty": 1.1}}',
+ 0, '', '', '{"kind": "detect"}', NULL, NULL);
