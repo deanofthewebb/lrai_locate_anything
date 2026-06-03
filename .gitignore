@@ -38,3 +38,6 @@ custom_demo.mp4
 
 # Logs
 *.log
+
+# Audit overlay QA renders (500+ MB .mp4 per re-render)
+docs/audit_overlay_qa/
