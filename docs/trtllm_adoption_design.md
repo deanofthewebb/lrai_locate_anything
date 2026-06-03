@@ -356,6 +356,67 @@ These are specific to the MoonViT port path (Decision #4 above). They do NOT blo
 
 ---
 
+## Deployment notes (verified 2026-06-03 on learn02)
+
+These are install-time gotchas discovered during Phase A. Bake them into
+every host's setup script and the Colab notebook in Phase G.
+
+### 1. Pin `tensorrt_llm==1.2.1`
+Latest stable as of 2026-06. v2.x release candidates may exist but require
+CUDA 13 + Python 3.11+ which our learn02 environment doesn't satisfy cleanly.
+
+### 2. `tensorrt_llm==1.2.1` requires CUDA 13 libs (NOT 12.8 as initial research suggested)
+The wheel pins `tensorrt-cu13==10.14.1.48.post1` directly. Our earlier research
+finding "v1.2.1 pins CUDA 12.8.1" was outdated (likely from v1.1.x docs).
+
+### 3. cu13 cuBLAS + cuDNN MUST come from NVIDIA's pypi index
+PyPI.org has placeholder packages named `nvidia-cublas` + `nvidia-cudnn` that
+just emit a warning telling you to use NVIDIA's index. The actual cu13 wheels
+live only at `https://pypi.nvidia.com`.
+
+```bash
+pip install --extra-index-url https://pypi.nvidia.com nvidia-cublas nvidia-cudnn
+```
+
+### 4. cu13 libs land at a non-standard path — LD_LIBRARY_PATH required
+After install, the libs are at:
+```
+<venv>/lib/python3.10/site-packages/nvidia/cu13/lib/libcublasLt.so.13
+<venv>/lib/python3.10/site-packages/nvidia/cudnn/lib/libcudnn.so.9
+```
+Python's dynamic linker doesn't search these by default. Source
+`scripts/trtllm_env.sh` (added in this commit) which sets
+`LD_LIBRARY_PATH` accordingly and activates the venv.
+
+### 5. Disk: TRT-LLM install needs ~25-30 GB
+- Wheel deps: ~7 GB (torch, cuDNN, cuBLAS, NCCL, cuSPARSE, etc.)
+- uv cache: ~21 GB (NVIDIA wheels are large)
+- Site-packages: ~15 GB resolved
+- On learn02, both the venv AND `UV_CACHE_DIR` must live on `/mnt/ssd0` —
+  `/home` is too small.
+
+### 6. Python version
+- v1.2.1 ships wheels for **Python 3.10** + **3.12** (NOT 3.11).
+- We use 3.10 on learn02. May want to switch to 3.12 in Colab.
+- TRT-LLM emits a runtime warning about "Python 3.10 below recommended 3.11" — benign, can ignore.
+
+### 7. Verified working smoke
+```bash
+source scripts/trtllm_env.sh
+python -c "
+import tensorrt as trt
+import tensorrt_llm
+from tensorrt_llm.runtime import ModelRunnerCpp
+from tensorrt_llm import LLM
+print(f'trt={trt.__version__}')        # 10.14.1.48.post1
+print(f'trtllm={tensorrt_llm.__version__}')  # 1.2.1
+print('ModelRunnerCpp: OK')
+print('LLM API: OK')
+"
+```
+
+---
+
 ## Risks
 
 ### R1 — TRT-LLM version mismatch with TRT 10.16
@@ -363,6 +424,7 @@ These are specific to the MoonViT port path (Decision #4 above). They do NOT blo
 - TRT-LLM v1.2.1 pins `tensorrt==10.9.x`. Our system has 10.16.1.11.
 - Pip will downgrade TRT inside the venv. System TRT (used by YOLOv12 production engines) must stay at 10.16.
 - **Mitigation:** Dedicated `~/venvs/trtllm/` venv with explicit `LD_LIBRARY_PATH` scoping in the launcher script. Document the boundary clearly. Pre-flight check at runner load: `assert tensorrt.__version__.startswith("10.9")`.
+- **Mitigation extended:** Also `LD_LIBRARY_PATH` the cu13 + cudnn lib dirs via `scripts/trtllm_env.sh` — see Deployment notes section.
 
 ### R2 — Custom vocab (152681) may need recipe modification
 **Severity: medium. Likelihood: medium.**
