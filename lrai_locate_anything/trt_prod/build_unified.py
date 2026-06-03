@@ -80,37 +80,37 @@ def build_llm_unified_engine(
             print(parser.get_error(e))
         raise RuntimeError("OnnxParser failed")
 
-    # Single optimization profile covering BOTH prefill and decode regimes.
-    # input_ids: (1, S) — S min=1 opt=1024 max=4096
-    # position_ids: (1, S) — same as input_ids
-    # attention_mask: (1, S) — same (prefill uses S, decode uses 1; both fit in [1, 4096])
-    # visual_features: (Lpost, hidden_size) — min=(0,2048) opt=(414,2048) max=(2048,2048)
-    # past_k_i / past_v_i: (1, n_kv_heads, P, head_dim) — P min=0 opt=1024 max=4096
-    # use_cache_branch: () BOOL scalar — no profile needed (no dynamic dims)
-    profile = builder.create_optimization_profile()
-    profile.set_shape("input_ids",      (1, 1), (1, 1024), (1, 4096))
-    profile.set_shape("position_ids",   (1, 1), (1, 1024), (1, 4096))
-    profile.set_shape("attention_mask", (1, 1), (1, 1024), (1, 4096))
-    profile.set_shape(
-        "visual_features",
-        (0, hidden_size),
-        (414, hidden_size),
-        (2048, hidden_size),
-    )
+    # Profile 0: PREFILL regime (use_cache_branch=False)
+    # S = prompt length (variable); P = 0 (no past KV); visual_features active.
+    profile_prefill = builder.create_optimization_profile()
+    profile_prefill.set_shape("input_ids",      (1, 1), (1, 1024), (1, 4096))
+    profile_prefill.set_shape("position_ids",   (1, 1), (1, 1024), (1, 4096))
+    profile_prefill.set_shape("attention_mask", (1, 1), (1, 1024), (1, 4096))
+    profile_prefill.set_shape("visual_features", (0, hidden_size), (414, hidden_size), (2048, hidden_size))
     for i in range(n_layers):
-        profile.set_shape(
-            f"past_k_{i}",
-            (1, n_kv_heads, 0, head_dim),
-            (1, n_kv_heads, 1024, head_dim),
-            (1, n_kv_heads, 4096, head_dim),
-        )
-        profile.set_shape(
-            f"past_v_{i}",
-            (1, n_kv_heads, 0, head_dim),
-            (1, n_kv_heads, 1024, head_dim),
-            (1, n_kv_heads, 4096, head_dim),
-        )
-    config.add_optimization_profile(profile)
+        profile_prefill.set_shape(f"past_k_{i}", (1, n_kv_heads, 0, head_dim),
+                                                  (1, n_kv_heads, 0, head_dim),
+                                                  (1, n_kv_heads, 0, head_dim))
+        profile_prefill.set_shape(f"past_v_{i}", (1, n_kv_heads, 0, head_dim),
+                                                  (1, n_kv_heads, 0, head_dim),
+                                                  (1, n_kv_heads, 0, head_dim))
+    config.add_optimization_profile(profile_prefill)
+
+    # Profile 1: DECODE regime (use_cache_branch=True)
+    # S = 1 (single token per step); P = past length (grows during generation); visual_features unused (zero-length).
+    profile_decode = builder.create_optimization_profile()
+    profile_decode.set_shape("input_ids",      (1, 1), (1, 1), (1, 1))
+    profile_decode.set_shape("position_ids",   (1, 1), (1, 1), (1, 1))
+    profile_decode.set_shape("attention_mask", (1, 2), (1, 1025), (1, 4097))  # P + S; min=2 ensures P>=1 since S>=1
+    profile_decode.set_shape("visual_features", (0, hidden_size), (0, hidden_size), (0, hidden_size))
+    for i in range(n_layers):
+        profile_decode.set_shape(f"past_k_{i}", (1, n_kv_heads, 1, head_dim),
+                                                 (1, n_kv_heads, 1024, head_dim),
+                                                 (1, n_kv_heads, 4096, head_dim))
+        profile_decode.set_shape(f"past_v_{i}", (1, n_kv_heads, 1, head_dim),
+                                                 (1, n_kv_heads, 1024, head_dim),
+                                                 (1, n_kv_heads, 4096, head_dim))
+    config.add_optimization_profile(profile_decode)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
