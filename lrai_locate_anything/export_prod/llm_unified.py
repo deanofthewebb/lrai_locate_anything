@@ -15,7 +15,7 @@ from typing import Dict, List, Tuple
 
 import onnx
 import onnx_graphsurgeon as gs
-from onnx import TensorProto, helper
+from onnx import TensorProto, external_data_helper, helper
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +228,45 @@ def merge_llm_to_unified(
     merged_model.ir_version = max(pre.ir_version, dec.ir_version)
 
     # ---- 9. Save with external data --------------------------------------
+    # Before save: resolve any pre-existing external_data refs into raw_data,
+    # strip the now-stale external_data metadata, and unlink any prior .bin at
+    # the target path. Without this, onnx.save's external-data writer appends
+    # new bytes WITHOUT truncating the file — producing a giant orphan-bytes
+    # prefix (e.g. 6 GB orphans + 6 GB live = 12 GB on disk for a 6 GB model).
+    base_dir = str(prefill_onnx.parent)
+    external_data_helper.load_external_data_for_model(merged_model, base_dir)
+    for init in merged_model.graph.initializer:
+        init.ClearField("external_data")
+        init.data_location = TensorProto.DEFAULT
+
+    bin_name = out_path.stem + ".bin"
+    target_bin = out_path.with_name(bin_name)
+    if target_bin.exists():
+        target_bin.unlink()
+
     onnx.save_model(
         merged_model,
         str(out_path),
         save_as_external_data=True,
         all_tensors_to_one_file=True,
-        location=out_path.stem + ".bin",
+        location=bin_name,
         size_threshold=1024,
     )
+
+    # Post-save guard: re-load metadata only and assert the bin starts at
+    # offset 0. If a future change re-introduces the append-without-truncate
+    # bug, this will raise instead of silently doubling disk usage.
+    saved = onnx.load(str(out_path), load_external_data=False)
+    offsets: List[int] = []
+    for init in saved.graph.initializer:
+        for kv in init.external_data:
+            if kv.key == "offset":
+                offsets.append(int(kv.value))
+    if offsets and min(offsets) != 0:
+        raise RuntimeError(
+            f"bin writer produced orphan-bytes prefix: min offset = {min(offsets)} != 0"
+        )
+
     return out_path
 
 
