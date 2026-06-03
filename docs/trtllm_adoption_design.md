@@ -417,6 +417,56 @@ print('LLM API: OK')
 
 ---
 
+## Phase F.6 / G.4 — End-to-end audit verification gate
+
+This is the canonical GO/NO-GO gate before declaring TRT-LLM adoption
+production-ready. The user explicitly requested this as the final
+acceptance test (2026-06-03).
+
+### Procedure
+
+`bash scripts/verify_trtllm_audit_e2e.sh A5_F1`
+
+Pre-authored in this commit so it can fire the moment Phases B-G land.
+
+### What it does
+
+1. Pre-flight: confirms `llm.engine` (Phase C) and `vision_encoder.engine`
+   (Phase D) exist; sources `scripts/trtllm_env.sh` for cu13 LD_LIBRARY_PATH.
+2. Runs `lrai_isp_audit.py` on the A5_F1 clip via the new `--path trtllm`
+   flag (added by Phase E in `runner_unified` integration), with ByteTrack
+   and per-class HUD (already-shipped commits).
+3. scp's the resulting overlay mp4 + CSV to the Mac at
+   `docs/audit_overlay_qa/A5_F1_trtllm.overlay.mp4` + `.csv`.
+4. Parses the CSV and asserts ALL 4 expected classes
+   (`roller bags`, `shoulder bags`, `carry-ons`, `people`) appear
+   in the IN/OUT counts. Missing class → exit 1 → gate fails.
+
+### Pass criteria
+
+- Exit 0 from the script
+- mp4 + CSV land on Mac
+- All 4 expected classes have at least one crossing event in the CSV
+- Per-class counts within 10% of the v4 ByteTrack baseline (a203d4c run)
+  — this controls for major regressions from the TRT-LLM pipeline
+
+### What the user does next
+
+Opens `A5_F1_trtllm.overlay.mp4` in a video player. Visual checks:
+- Top-left HUD shows live per-class IN/OUT counts
+- Bounding boxes track correctly across occlusions (ByteTrack)
+- No mode collapse / no NaN frames
+- Detection quality at max_side=1280 is acceptable for customer showcase
+
+If both the script's automated checks AND visual QA pass, TRT-LLM
+adoption is GO for production deployment. Otherwise the failure
+mode determines next steps:
+- Class missing entirely → Phase B vocab/lm_head regression
+- Counts off by >10% → Phase D vision-encoder parity regression
+- Mode collapse → Phase E runner KV-cache / sampling regression
+
+---
+
 ## Risks
 
 ### R1 — TRT-LLM version mismatch with TRT 10.16
