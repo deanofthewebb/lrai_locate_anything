@@ -69,8 +69,8 @@ def build_llm_unified_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     )
     config = builder.create_builder_config()
-    config.set_flag(trt.BuilderFlag.BF16)
-    # CRITICAL: do NOT also set FP16 — STRONGLY_TYPED makes that an error.
+    # STRONGLY_TYPED networks derive precision from ONNX dtypes; explicit BF16/FP16
+    # builder flags are forbidden here (TRT 10 Error Code 3).
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)  # 4 GB
 
     parser = trt.OnnxParser(network, logger or get_trt_logger())
