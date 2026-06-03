@@ -6,7 +6,9 @@ Qwen2 LM body params nested in text_config. TRT-LLM's QWenConfig.from_hugging_fa
 requires model_type='qwen2' at root.
 
 This script creates a sibling directory containing:
-- Symlinks for all original files EXCEPT config.json
+- Symlinks for all original files EXCEPT config.json (RELATIVE symlinks, so the
+  patched dir works correctly when bind-mounted into a Docker container — only
+  the parent path is mounted, not arbitrary absolute paths)
 - A patched config.json with text_config hoisted to root + model_type=qwen2
 
 Usage:
@@ -29,7 +31,10 @@ def patch(src: Path, dst: Path) -> Path:
     for entry in src.iterdir():
         if entry.name == "config.json":
             continue
-        (dst / entry.name).symlink_to(entry)
+        # Use RELATIVE symlinks so the patched dir works inside Docker
+        # containers that bind-mount the parent (only one path mounted, not absolute paths).
+        rel = os.path.relpath(entry, dst)
+        (dst / entry.name).symlink_to(rel)
 
     # Build patched config.json
     src_cfg = json.loads((src / "config.json").read_text())

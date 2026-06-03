@@ -467,6 +467,20 @@ mode determines next steps:
 - Counts off by >10% → Phase D vision-encoder parity regression
 - Mode collapse → Phase E runner KV-cache / sampling regression
 
+### 8. nvcr.io/nvidia/tensorrt-llm/release:latest is stale at v1.0.0
+As of 2026-06-03 the :latest tag pulls TRT-LLM v1.0.0 (8 months old) — not v1.2.1.
+This is fine for the POC (CUDA inits cleanly, build succeeds), but pin a specific
+digest if reproducibility matters. Our `weights_qwen2patched/config.json` patcher
+worked unchanged with v1.0.0's Qwen2 recipe; the v1.2.1 ckpt format
+(`enable_lm_head_tp_in_adp` field) was rejected by v1.0.0's Mapping class —
+solution was to re-convert inside the container so ckpt + build are version-matched.
+
+### 9. weights_qwen2patched symlinks MUST be relative
+The patcher (scripts/patch_locateanything_config_for_trtllm.py) uses relative
+symlinks (`../weights/file`) instead of absolute (`/mnt/ssd0/.../weights/file`)
+so the patched dir resolves correctly when only the parent dir is bind-mounted
+into a Docker container.
+
 ---
 
 ## Risks
