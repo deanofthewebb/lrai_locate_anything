@@ -15,6 +15,11 @@ COORD_RE = re.compile(r"<(\d+)>")
 # Interleave-aware scanner: walks <ref>label</ref> and <box>...</box> markers in
 # emission order so we can pair every box with the most-recently-seen ref label.
 REF_OR_BOX_RE = re.compile(r"<ref>(.*?)</ref>|<box>(.*?)</box>", re.S)
+# Defensive: when the model emits a malformed intermediate output, a coordinate
+# token like "<673>" (or partial "<673" / "673>") can leak into the <ref> slot.
+# These should be treated as 'unknown' so they don't pollute downstream class
+# counts. The v3 ISP audit CSV surfaced a row with class='<673>'.
+_COORD_TOKEN_RE = re.compile(r"^<?\d+>?$")
 
 
 def parse_boxes(
@@ -41,6 +46,11 @@ def parse_boxes(
         ref_text, box_blk = m.group(1), m.group(2)
         if ref_text is not None:
             current_label = ref_text.strip() or current_label
+            # Strip leaked coordinate tokens (e.g. "<673>", "673>", "<673")
+            # that the model occasionally emits inside <ref>...</ref> when
+            # the intermediate output is malformed. Treat as 'unknown'.
+            if _COORD_TOKEN_RE.match(current_label.strip()):
+                current_label = "unknown"
             continue
         coords = [int(x) for x in COORD_RE.findall(box_blk or "")]
         if len(coords) >= 4:

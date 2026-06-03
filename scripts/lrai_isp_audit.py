@@ -262,6 +262,74 @@ class GreedyIoUTracker:
 
 
 # ---------------------------------------------------------------------------
+# ByteTrack wrapper. Drop-in replacement for GreedyIoUTracker with the same
+# update() signature and return shape. Uses supervision.ByteTrack for the
+# 2-stage association (high-conf -> low-conf) + Kalman prediction needed to
+# preserve identity through occlusions (e.g. a person carrying 3 bags).
+#
+# `supervision` is imported lazily inside __init__ so this file still imports
+# cleanly when the package isn't installed (matters during the Install phase
+# of the audit driver, which happens AFTER tracker selection at arg-parse
+# time but BEFORE the tracker is constructed).
+# ---------------------------------------------------------------------------
+class ByteTracker:
+    def __init__(self, frame_rate: int = 5):
+        # Lazy import — see header comment.
+        import supervision as sv  # noqa: F401  (kept as module attr below)
+        self._sv = sv
+        self._byte = sv.ByteTrack(
+            frame_rate=frame_rate,
+            track_activation_threshold=0.25,
+            lost_track_buffer=30,
+            minimum_matching_threshold=0.8,
+        )
+        # track_id -> last centroid (for prev/curr emission to _evaluate_line)
+        self._prev_centers: Dict[int, Tuple[float, float]] = {}
+        # track_id -> latest-wins class label (matches the running behavior the
+        # downstream HUD/CSV expects; majority vote across lifetime is a future
+        # refinement once we have per-detection confidence to weight by).
+        self._class_by_tid: Dict[int, str] = {}
+        # Stable int<->str label mapping so sv.Detections can carry the class
+        # through update_with_detections() (which only accepts integer class_id).
+        self._label_to_id: Dict[str, int] = {}
+        self._inv_label: Dict[int, str] = {}
+
+    def _intern(self, label: str) -> int:
+        cid = self._label_to_id.get(label)
+        if cid is None:
+            cid = len(self._label_to_id)
+            self._label_to_id[label] = cid
+            self._inv_label[cid] = label
+        return cid
+
+    def update(self, detections: List[Tuple[Tuple[float, float, float, float], str]],
+               frame_idx: int
+               ) -> List[Tuple[int, str, Tuple[float, float], Tuple[float, float]]]:
+        if not detections:
+            return []
+        xyxy = np.array([d[0] for d in detections], dtype=np.float32)
+        class_ids = np.array([self._intern(d[1]) for d in detections], dtype=int)
+        # We don't have model confidence from the VLM — use 1.0 so every
+        # detection clears ByteTrack's high-confidence threshold.
+        conf = np.ones((len(detections),), dtype=np.float32)
+        sv_dets = self._sv.Detections(xyxy=xyxy, confidence=conf, class_id=class_ids)
+        tracked = self._byte.update_with_detections(sv_dets)
+        results: List[Tuple[int, str, Tuple[float, float], Tuple[float, float]]] = []
+        for i in range(len(tracked)):
+            tid = int(tracked.tracker_id[i])
+            x1, y1, x2, y2 = tracked.xyxy[i]
+            cx = float((x1 + x2) / 2.0)
+            cy = float((y1 + y2) / 2.0)
+            cls_id = int(tracked.class_id[i]) if tracked.class_id is not None else -1
+            label = self._inv_label.get(cls_id, "unknown")
+            self._class_by_tid[tid] = label  # latest-wins
+            prev = self._prev_centers.get(tid, (cx, cy))
+            self._prev_centers[tid] = (cx, cy)
+            results.append((tid, label, prev, (cx, cy)))
+        return results
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
@@ -292,6 +360,11 @@ def main() -> int:
                          "before detect() (vision-attention memory caps VRAM-limited GPUs). "
                          "Boxes are rescaled back to ORIGINAL frame pixel space for "
                          "tracker_bot CSV compatibility. Typical: 1280 for 2080 Ti.")
+    ap.add_argument("--tracker", default="bytetrack", choices=("bytetrack", "greedy"),
+                    help="Multi-object tracker. bytetrack uses supervision.ByteTrack "
+                         "(recommended for production — 2-stage association + Kalman "
+                         "preserves identity through occlusions). greedy is the legacy "
+                         "GreedyIoUTracker kept as a fallback for one cycle.")
     args = ap.parse_args()
 
     # Lazy import so --help works without torch
@@ -335,7 +408,11 @@ def main() -> int:
     out_per_class["other"] = 0
 
     lines_cfg = _build_line_configs(args.lines)
-    tracker = GreedyIoUTracker()
+    if args.tracker == "bytetrack":
+        tracker = ByteTracker(frame_rate=args.target_fps)
+    else:
+        tracker = GreedyIoUTracker()
+    print(f"[audit] tracker={args.tracker}", file=sys.stderr)
     rows: List[dict] = []
     inference_time = 0.0
     n_inferences = 0
