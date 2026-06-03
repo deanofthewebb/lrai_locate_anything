@@ -12,6 +12,9 @@ import numpy as np
 
 BOX_RE = re.compile(r"<box>(.*?)</box>", re.S)
 COORD_RE = re.compile(r"<(\d+)>")
+# Interleave-aware scanner: walks <ref>label</ref> and <box>...</box> markers in
+# emission order so we can pair every box with the most-recently-seen ref label.
+REF_OR_BOX_RE = re.compile(r"<ref>(.*?)</ref>|<box>(.*?)</box>", re.S)
 
 
 def parse_boxes(text: str, W: float = 1.0, H: float = 1.0) -> List[Tuple[float, float, float, float]]:
@@ -26,6 +29,36 @@ def parse_boxes(text: str, W: float = 1.0, H: float = 1.0) -> List[Tuple[float, 
         if len(coords) >= 4:
             x1, y1, x2, y2 = coords[:4]
             out.append((x1 / 1000 * W, y1 / 1000 * H, x2 / 1000 * W, y2 / 1000 * H))
+    return out
+
+
+def parse_boxes_with_labels(
+    text: str, W: float = 1.0, H: float = 1.0
+) -> List[Tuple[Tuple[float, float, float, float], str]]:
+    """Extract bounding boxes paired with their class label.
+
+    Multi-class output looks like
+        <ref>roller bags</ref><box><x1><y1><x2><y2></box>
+        <ref>shoulder bags</ref><box>...</box><box>...</box>
+    where a single <ref> can govern a run of consecutive <box> blocks. We walk
+    <ref> and <box> markers in emission order, carrying the latest label as
+    state. Boxes that appear before any <ref> are tagged 'unknown' (defensive;
+    the canonical 4-class prompt always emits a leading <ref>).
+
+    Returns [(bbox, label)] tuples; bbox is in pixel space scaled by (W, H).
+    """
+    out: List[Tuple[Tuple[float, float, float, float], str]] = []
+    current_label = "unknown"
+    for m in REF_OR_BOX_RE.finditer(text):
+        ref_text, box_blk = m.group(1), m.group(2)
+        if ref_text is not None:
+            current_label = ref_text.strip() or current_label
+            continue
+        coords = [int(x) for x in COORD_RE.findall(box_blk or "")]
+        if len(coords) >= 4:
+            x1, y1, x2, y2 = coords[:4]
+            bbox = (x1 / 1000 * W, y1 / 1000 * H, x2 / 1000 * W, y2 / 1000 * H)
+            out.append((bbox, current_label))
     return out
 
 

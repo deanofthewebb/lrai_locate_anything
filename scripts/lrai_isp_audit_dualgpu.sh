@@ -36,7 +36,7 @@ WEIGHTS="${WEIGHTS:-/home/lrm/locany_test/weights}"
 VENV="${VENV:-/home/lrm/locany_test/venv}"
 REPO="${REPO:-/home/lrm/locany_test/repo}"
 TARGET_FPS="${TARGET_FPS:-5}"
-PROMPT='Locate all the instances that matches the following description: people.'
+PROMPT='Locate all the instances that matches the following description: roller bag</c>shoulder bag</c>carry-on</c>person.'
 
 while [ $# -gt 0 ]; do
   case "$1" in

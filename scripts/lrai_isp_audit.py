@@ -10,8 +10,8 @@ Detector backend swap: PeopleNet ONNX → LocateAnything-3B VLM. Tracker swap:
 safetunnel ByteTracker → minimal greedy-IoU tracker (BT not yet ported; this
 matches well enough for AI-FPS measurement + line-crossing schema validation).
 
-Output schema (matches tracker_bot exactly):
-    frame,timestamp_s,line_id,line_name,track_id,direction,
+Output schema (extends tracker_bot with a per-row class column):
+    frame,timestamp_s,line_id,line_name,track_id,class,direction,
     coalesced,in_count_after,out_count_after,x,y
 
 Performance metrics printed to stderr:
@@ -107,8 +107,8 @@ def _build_line_configs(lines_json_path: Path) -> List[LineConfig]:
     return out
 
 
-def _evaluate_line(line: LineConfig, track_id: int, prev_pt, curr_pt,
-                   frame: int, ts: float) -> List[dict]:
+def _evaluate_line(line: LineConfig, track_id: int, track_class: str,
+                   prev_pt, curr_pt, frame: int, ts: float) -> List[dict]:
     """Check every segment of `line` for a crossing on the `prev_pt → curr_pt`
     motion vector. Apply anchor-side polarity and coalesce dedup. Returns
     CSV rows (one per crossing event)."""
@@ -143,7 +143,8 @@ def _evaluate_line(line: LineConfig, track_id: int, prev_pt, curr_pt,
         rows.append({
             "frame": frame, "timestamp_s": f"{ts:.3f}",
             "line_id": line.line_id, "line_name": line.name,
-            "track_id": track_id, "direction": direction,
+            "track_id": track_id, "class": track_class,
+            "direction": direction,
             "coalesced": coalesced,
             "in_count_after": line.in_count,
             "out_count_after": line.out_count,
@@ -163,6 +164,14 @@ class Track:
     bbox: Tuple[float, float, float, float]
     center: Tuple[float, float]
     last_seen: int
+    # Per-track class label is decided by MAJORITY VOTE over every hit the
+    # track has received. `class_votes` accumulates {label: hit_count} and
+    # `class_label` is the running argmax. This absorbs single-frame label
+    # flicker (e.g. one stray "shoulder bags" hit on a true carry-on track)
+    # while still letting a track that consistently re-identifies as another
+    # class flip over time.
+    class_label: str = "unknown"
+    class_votes: Dict[str, int] = field(default_factory=dict)
 
 
 def _bbox_iou(a, b) -> float:
@@ -183,18 +192,24 @@ class GreedyIoUTracker:
         self.tracks: Dict[int, Track] = {}
         self.next_id = 1
 
-    def update(self, detections: List[Tuple[float, float, float, float]], frame_idx: int
-               ) -> List[Tuple[int, Tuple[float, float], Tuple[float, float]]]:
-        """Returns [(track_id, prev_center, curr_center)] for active tracks updated this frame."""
-        # Build IoU matrix
+    def update(self, detections: List[Tuple[Tuple[float, float, float, float], str]],
+               frame_idx: int
+               ) -> List[Tuple[int, str, Tuple[float, float], Tuple[float, float]]]:
+        """Update tracks with per-detection (bbox, class_label) pairs.
+
+        Returns [(track_id, class_label, prev_center, curr_center)] for active
+        tracks updated this frame. class_label is the running majority vote
+        across the track's lifetime."""
+        # Build IoU matrix (boxes only — labels do not gate association so
+        # mis-labelled frames don't fragment an otherwise-consistent track)
         track_ids = list(self.tracks.keys())
         if not track_ids or not detections:
             assignments = {}
         else:
             iou_mat = np.zeros((len(track_ids), len(detections)), dtype=np.float32)
             for i, tid in enumerate(track_ids):
-                for j, det in enumerate(detections):
-                    iou_mat[i, j] = _bbox_iou(self.tracks[tid].bbox, det)
+                for j, (det_bbox, _det_lbl) in enumerate(detections):
+                    iou_mat[i, j] = _bbox_iou(self.tracks[tid].bbox, det_bbox)
             assignments = {}
             # Greedy: pick max-IoU pair iteratively
             while True:
@@ -210,21 +225,34 @@ class GreedyIoUTracker:
         out = []
         matched_dets = set(assignments.values())
         for tid, j in assignments.items():
-            det = detections[j]
+            det_bbox, det_lbl = detections[j]
             prev_center = self.tracks[tid].center
-            new_center = ((det[0] + det[2]) / 2, (det[1] + det[3]) / 2)
-            self.tracks[tid] = Track(track_id=tid, bbox=det, center=new_center, last_seen=frame_idx)
-            out.append((tid, prev_center, new_center))
+            new_center = ((det_bbox[0] + det_bbox[2]) / 2, (det_bbox[1] + det_bbox[3]) / 2)
+            prev = self.tracks[tid]
+            votes = dict(prev.class_votes)
+            votes[det_lbl] = votes.get(det_lbl, 0) + 1
+            # Majority vote (ties broken by max() — deterministic on first-seen
+            # ordering of the votes dict, good enough for downstream stats)
+            best_label = max(votes.items(), key=lambda kv: kv[1])[0]
+            self.tracks[tid] = Track(
+                track_id=tid, bbox=det_bbox, center=new_center,
+                last_seen=frame_idx, class_label=best_label, class_votes=votes,
+            )
+            out.append((tid, best_label, prev_center, new_center))
 
         # Spawn new tracks for unmatched detections
-        for j, det in enumerate(detections):
+        for j, (det_bbox, det_lbl) in enumerate(detections):
             if j in matched_dets:
                 continue
             tid = self.next_id; self.next_id += 1
-            cx, cy = (det[0] + det[2]) / 2, (det[1] + det[3]) / 2
-            self.tracks[tid] = Track(track_id=tid, bbox=det, center=(cx, cy), last_seen=frame_idx)
+            cx, cy = (det_bbox[0] + det_bbox[2]) / 2, (det_bbox[1] + det_bbox[3]) / 2
+            self.tracks[tid] = Track(
+                track_id=tid, bbox=det_bbox, center=(cx, cy),
+                last_seen=frame_idx, class_label=det_lbl,
+                class_votes={det_lbl: 1},
+            )
             # No prior position → emit at curr=prev so no crossing on creation
-            out.append((tid, (cx, cy), (cx, cy)))
+            out.append((tid, det_lbl, (cx, cy), (cx, cy)))
 
         # Age out stale tracks
         for tid in list(self.tracks.keys()):
@@ -249,7 +277,7 @@ def main() -> int:
                     help="Cap video duration for smoke tests (0 = full clip)")
     ap.add_argument("--weights", type=Path, default=Path("/tmp/locany_local/weights"),
                     help="LocateAnything-3B local weights dir")
-    ap.add_argument("--prompt", default="Locate all the instances that matches the following description: people.",
+    ap.add_argument("--prompt", default="Locate all the instances that matches the following description: roller bag</c>shoulder bag</c>carry-on</c>person.",
                     help="Detection prompt (canonicalize_prompt auto-pluralizes singulars)")
     ap.add_argument("--device", default=None,
                     help="Override device (cpu/mps/cuda); default = autodetect")
@@ -270,7 +298,7 @@ def main() -> int:
     import torch
     from lrai_locate_anything.model_loader import load_locateanything_3b
     from lrai_locate_anything.orchestrator import LocateAnythingRunner, canonicalize_prompt
-    from lrai_locate_anything.parse import parse_boxes
+    from lrai_locate_anything.parse import parse_boxes_with_labels
 
     print(f"[audit] device={args.device or 'auto'}  weights={args.weights}", file=sys.stderr)
     t_load_0 = time.time()
@@ -286,6 +314,25 @@ def main() -> int:
     canonical_prompt, was_rewritten = canonicalize_prompt(args.prompt)
     if was_rewritten:
         print(f"[audit] prompt rewritten: {args.prompt!r} -> {canonical_prompt!r}", file=sys.stderr)
+
+    # Derive the expected class set (post-pluralization) from the canonical
+    # prompt so the per-class HUD + tallies stay in lockstep with whatever
+    # was actually sent to the model. The model emits these exact strings in
+    # <ref>...</ref> blocks.
+    _target_match = re.search(
+        r"matches the following description:\s*(.+?)\.?\s*$",
+        canonical_prompt, re.I,
+    )
+    if _target_match:
+        class_order = [c.strip() for c in _target_match.group(1).split("</c>") if c.strip()]
+    else:
+        class_order = []
+    print(f"[audit] classes (from canonical prompt): {class_order}", file=sys.stderr)
+    in_per_class: Dict[str, int] = {c: 0 for c in class_order}
+    out_per_class: Dict[str, int] = {c: 0 for c in class_order}
+    # OOV bucket for any <ref> text the model emits that doesn't match the prompt
+    in_per_class["other"] = 0
+    out_per_class["other"] = 0
 
     lines_cfg = _build_line_configs(args.lines)
     tracker = GreedyIoUTracker()
@@ -339,28 +386,62 @@ def main() -> int:
             pil_in = pil
 
         t0 = time.time()
-        boxes, _text = runner.detect(pil_in, canonical_prompt, diagnostic=False, path=args.path)
+        # Re-parse the raw text with labels (runner.detect returns labelless
+        # boxes for back-compat; class labels live in the <ref>...</ref> tags
+        # which are dropped by parse_boxes).
+        _boxes_unused, raw_text = runner.detect(
+            pil_in, canonical_prompt, diagnostic=False, path=args.path,
+        )
+        labeled = parse_boxes_with_labels(raw_text, W=float(pil_in.size[0]), H=float(pil_in.size[1]))
         inference_time += time.time() - t0
         n_inferences += 1
-        n_detections_total += len(boxes)
+        n_detections_total += len(labeled)
 
-        if scale != 1.0 and boxes:
+        if scale != 1.0 and labeled:
             inv = 1.0 / scale
-            boxes = [(x1 * inv, y1 * inv, x2 * inv, y2 * inv) for (x1, y1, x2, y2) in boxes]
+            labeled = [((x1 * inv, y1 * inv, x2 * inv, y2 * inv), lbl)
+                       for ((x1, y1, x2, y2), lbl) in labeled]
 
         # Tracker + crossing eval
-        tracks = tracker.update(list(boxes), frame_idx)
-        for tid, prev_c, curr_c in tracks:
+        tracks = tracker.update(list(labeled), frame_idx)
+        for tid, tcls, prev_c, curr_c in tracks:
+            # Bucket OOV (unrecognized) labels into "other" for the running tally
+            bucket = tcls if tcls in in_per_class else "other"
             for ln in lines_cfg:
-                rows.extend(_evaluate_line(ln, tid, prev_c, curr_c, frame_idx, ts))
+                new_rows = _evaluate_line(ln, tid, tcls, prev_c, curr_c, frame_idx, ts)
+                for r in new_rows:
+                    if r["direction"] == "IN":
+                        in_per_class[bucket] += 1
+                        if r["coalesced"]:
+                            out_per_class[bucket] = max(0, out_per_class[bucket] - 1)
+                    else:
+                        out_per_class[bucket] += 1
+                        if r["coalesced"]:
+                            in_per_class[bucket] = max(0, in_per_class[bucket] - 1)
+                rows.extend(new_rows)
 
         # Overlay
         if writer is not None:
-            for (x1, y1, x2, y2) in boxes:
+            for (x1, y1, x2, y2), _lbl in labeled:
                 cv2.rectangle(bgr, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-            cv2.putText(bgr, f"t={ts:.1f}s  dets={len(boxes)}  ai={n_inferences/inference_time:.2f} fps"
-                        if inference_time > 0 else f"t={ts:.1f}s",
-                        (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            # Per-class HUD in TOP-LEFT corner with a semi-transparent dark
+            # background rectangle for readability on busy footage.
+            hud_lines = [f"{c}: IN={in_per_class[c]}  OUT={out_per_class[c]}"
+                         for c in class_order]
+            ai_fps_str = (f"ai={n_inferences/inference_time:.2f} fps"
+                          if inference_time > 0 else "ai=0.00 fps")
+            hud_lines.append(f"t={ts:.1f}s  dets={len(labeled)}  {ai_fps_str}")
+            line_h = 25
+            pad = 6
+            hud_h = line_h * len(hud_lines) + pad * 2
+            hud_w = 360
+            overlay_bg = bgr.copy()
+            cv2.rectangle(overlay_bg, (0, 0), (hud_w, hud_h), (0, 0, 0), -1)
+            cv2.addWeighted(overlay_bg, 0.55, bgr, 0.45, 0, dst=bgr)
+            for i, txt in enumerate(hud_lines):
+                y = pad + line_h * (i + 1) - 6  # baseline within each line slot
+                cv2.putText(bgr, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55, (255, 255, 255), 1, cv2.LINE_AA)
             for ln in lines_cfg:
                 for (a, b) in ln.segments:
                     cv2.line(bgr, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])), (255, 0, 0), 2)
@@ -391,7 +472,8 @@ def main() -> int:
     with args.out_csv.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=[
             "frame", "timestamp_s", "line_id", "line_name", "track_id",
-            "direction", "coalesced", "in_count_after", "out_count_after", "x", "y",
+            "class", "direction", "coalesced",
+            "in_count_after", "out_count_after", "x", "y",
         ])
         w.writeheader()
         w.writerows(rows)
@@ -406,6 +488,8 @@ def main() -> int:
     print(f"  proc_fps             = {proc_fps:.2f}   (end-to-end incl decode/track/count)", file=sys.stderr)
     print(f"  in_total             = {total_in}", file=sys.stderr)
     print(f"  out_total            = {total_out}", file=sys.stderr)
+    print(f"  in_per_class         = {in_per_class}", file=sys.stderr)
+    print(f"  out_per_class        = {out_per_class}", file=sys.stderr)
     print(f"  csv_out              = {args.out_csv}", file=sys.stderr)
     if args.out_video is not None:
         print(f"  video_out            = {args.out_video}", file=sys.stderr)
