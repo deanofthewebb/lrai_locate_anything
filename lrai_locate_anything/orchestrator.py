@@ -991,11 +991,14 @@ class LocateAnythingRunner:
         )
         text = self.tokenizer.decode(toks, skip_special_tokens=False)
         boxes_lb = parse_boxes(text, self.eng_img_w, self.eng_img_h)
-        # Undo letterbox: letterbox_xy -> orig_xy
+        # Undo letterbox: letterbox_xy -> orig_xy. parse_boxes now returns
+        # [(bbox, label)]; strip the label here for back-compat with the
+        # public detect() contract (re-parse with labels at the call-site if
+        # needed — see scripts/lrai_isp_audit.py).
         boxes_orig = [
             ((x1 - pad_x) / scale, (y1 - pad_y) / scale,
              (x2 - pad_x) / scale, (y2 - pad_y) / scale)
-            for (x1, y1, x2, y2) in boxes_lb
+            for ((x1, y1, x2, y2), _lbl) in boxes_lb
         ]
         return boxes_orig, text
 
@@ -1049,7 +1052,11 @@ class LocateAnythingRunner:
                 new_snap = apply_vision_patches(self.model, verbose=False)
                 self.patches_snapshot = new_snap
         orig_w, orig_h = image.size
-        return parse_boxes(text, orig_w, orig_h), text
+        # parse_boxes now returns [(bbox, label)]; strip labels here so
+        # _detect_via_pt continues to return labelless boxes (back-compat with
+        # the public detect() contract). Callers that need labels should
+        # re-parse the raw text via parse_boxes directly.
+        return [bbox for (bbox, _lbl) in parse_boxes(text, orig_w, orig_h)], text
 
     def detect(self, image, prompt: str = "Locate all the instances that matches the following description: object.",
                max_new_tokens: int = 128, generation_mode: str = "hybrid",

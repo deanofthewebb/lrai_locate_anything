@@ -161,7 +161,9 @@ def run_compare(
             else:
                 txt = str(ot)
             from .parse import parse_boxes as _pb
-            boxes = _pb(txt, *pil.size)
+            # parse_boxes returns [(bbox, label)]; strip labels for the
+            # downstream rendering loop which only consumes 4-tuples.
+            boxes = [bbox for (bbox, _lbl) in _pb(txt, *pil.size)]
             return boxes, txt
         paths.append(("PyTorch", _pt))
 

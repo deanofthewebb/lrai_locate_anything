@@ -19,12 +19,13 @@ class TestParseBoxes:
         text = "<box><100><200><500><600></box>"
         out = parse_boxes(text)
         assert len(out) == 1
-        assert out[0] == pytest.approx((0.1, 0.2, 0.5, 0.6), rel=1e-6)
+        assert out[0][0] == pytest.approx((0.1, 0.2, 0.5, 0.6), rel=1e-6)
+        assert out[0][1] == "unknown"
 
     def test_single_box_scales_to_image_size(self):
         text = "<box><100><200><500><600></box>"
         out = parse_boxes(text, W=1000, H=2000)
-        assert out[0] == pytest.approx((100.0, 400.0, 500.0, 1200.0), rel=1e-6)
+        assert out[0][0] == pytest.approx((100.0, 400.0, 500.0, 1200.0), rel=1e-6)
 
     def test_multiple_boxes(self):
         text = (
@@ -33,8 +34,10 @@ class TestParseBoxes:
         )
         out = parse_boxes(text, W=100, H=100)
         assert len(out) == 2
-        assert out[0] == pytest.approx((1.0, 2.0, 3.0, 4.0))
-        assert out[1] == pytest.approx((5.0, 6.0, 7.0, 8.0))
+        assert out[0][0] == pytest.approx((1.0, 2.0, 3.0, 4.0))
+        assert out[0][1] == "cat"
+        assert out[1][0] == pytest.approx((5.0, 6.0, 7.0, 8.0))
+        assert out[1][1] == "dog"
 
     def test_malformed_box_ignored(self):
         # Only 2 coords in the second block — should be skipped, not error.
@@ -45,12 +48,12 @@ class TestParseBoxes:
     def test_more_than_4_coords_takes_first_4(self):
         text = "<box><1><2><3><4><5><6></box>"
         out = parse_boxes(text, W=1000, H=1000)
-        assert out[0] == pytest.approx((1.0, 2.0, 3.0, 4.0))
+        assert out[0][0] == pytest.approx((1.0, 2.0, 3.0, 4.0))
 
     def test_coords_at_bounds(self):
         text = "<box><0><0><1000><1000></box>"
         out = parse_boxes(text, W=1024, H=768)
-        assert out[0] == pytest.approx((0.0, 0.0, 1024.0, 768.0))
+        assert out[0][0] == pytest.approx((0.0, 0.0, 1024.0, 768.0))
 
 
 # ---------------------------------------------------------------------------

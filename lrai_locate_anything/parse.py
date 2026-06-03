@@ -17,29 +17,17 @@ COORD_RE = re.compile(r"<(\d+)>")
 REF_OR_BOX_RE = re.compile(r"<ref>(.*?)</ref>|<box>(.*?)</box>", re.S)
 
 
-def parse_boxes(text: str, W: float = 1.0, H: float = 1.0) -> List[Tuple[float, float, float, float]]:
-    """Extract bounding boxes from the model's coord-token output.
-
-    The model emits `<box><x1><y1><x2><y2></box>` blocks with coordinates in [0, 1000].
-    We map back to pixel space using (W, H) — pass the image dimensions the model saw.
-    """
-    out: List[Tuple[float, float, float, float]] = []
-    for blk in BOX_RE.findall(text):
-        coords = [int(x) for x in COORD_RE.findall(blk)]
-        if len(coords) >= 4:
-            x1, y1, x2, y2 = coords[:4]
-            out.append((x1 / 1000 * W, y1 / 1000 * H, x2 / 1000 * W, y2 / 1000 * H))
-    return out
-
-
-def parse_boxes_with_labels(
+def parse_boxes(
     text: str, W: float = 1.0, H: float = 1.0
 ) -> List[Tuple[Tuple[float, float, float, float], str]]:
     """Extract bounding boxes paired with their class label.
 
-    Multi-class output looks like
+    The model emits `<box><x1><y1><x2><y2></box>` blocks with coordinates in
+    [0, 1000]. Multi-class output looks like
+
         <ref>roller bags</ref><box><x1><y1><x2><y2></box>
         <ref>shoulder bags</ref><box>...</box><box>...</box>
+
     where a single <ref> can govern a run of consecutive <box> blocks. We walk
     <ref> and <box> markers in emission order, carrying the latest label as
     state. Boxes that appear before any <ref> are tagged 'unknown' (defensive;
@@ -60,6 +48,10 @@ def parse_boxes_with_labels(
             bbox = (x1 / 1000 * W, y1 / 1000 * H, x2 / 1000 * W, y2 / 1000 * H)
             out.append((bbox, current_label))
     return out
+
+
+# Backward-compat alias for callers that imported the explicitly-named variant.
+parse_boxes_with_labels = parse_boxes
 
 
 def iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:

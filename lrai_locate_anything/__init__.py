@@ -17,7 +17,7 @@ export.int4              optional INT4 AWQ via NVIDIA Model Optimizer (see cavea
 from .config import WORK, MODEL_ID, REF_DTYPE, ONNX_DIR, TRT_DIR, ensure_nvidia_stack, ensure_runtime_deps
 from .orchestrator import LocateAnythingRunner
 from .pipelines import run_image, run_video, run_compare
-from .parse import parse_boxes, iou, python_patch_merger
+from .parse import parse_boxes, parse_boxes_with_labels, iou, python_patch_merger
 
 __version__ = "0.2.0"
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "run_video",
     "run_compare",
     "parse_boxes",
+    "parse_boxes_with_labels",
     "iou",
     "python_patch_merger",
     "WORK",
