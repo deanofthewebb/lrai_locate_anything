@@ -119,7 +119,7 @@ Distribution: all files uploaded to `s3://data-labeling.livereachmedia.com/datas
 
 ---
 
-## Phase Plan (careful design, extensive testing — per user directive)
+## Phase Plan (careful design, extensive testing — per user directive): ~34 dev-days total
 
 ### Phase A — Environment + dependency setup (1 day, **small**, risk: medium)
 
@@ -186,7 +186,7 @@ Concrete tasks:
 
 ---
 
-### Phase D — MoonViT port to TRT-LLM `build_multimodal_engine.py` (10–15 days, **xlarge**, risk: high)
+### Phase D — MoonViT port to TRT-LLM `build_multimodal_engine.py` (12 days, **xlarge**, risk: high; SigLIP fork + dynamic grid + projector-inside + bf16)
 
 **Deliverable:** `vision_encoder.engine` (~2 GB) built natively via TRT-LLM tooling — single TRT 10.9 runtime, no dual-runtime split.
 
@@ -198,6 +198,8 @@ Rationale:
 - Cost is upfront: we have to translate MoonViT's custom ops (Rope2DReal, sdpa_packed without `cu_seqlens`, grid_hws baking, patch_merger static reshape) into a TRT-LLM-native template.
 
 Concrete sub-deliverables:
+
+Confirmed base: SigLIP (modeling_siglip.py); see resolved sub-decisions above.
 
 - **D.1 — Template audit.** Read TRT-LLM's vision encoder templates: CLIP, SigLIP, Qwen2-VL ViT, InternVL ViT. Pick the closest base (likely InternVL or Qwen2-VL — both are MoonViT-adjacent). Output: short comparison note + selected base in `trtllm_prod/vision/BASE.md`.
 
@@ -349,10 +351,10 @@ All five decisions are locked in. Recorded here for traceability.
 
 These are specific to the MoonViT port path (Decision #4 above). They do NOT block Phase A/B/C, which are pure LM-body work.
 
-- **D-sub-1: Base template choice.** Which TRT-LLM vision encoder template do we fork as the base — CLIP, SigLIP, Qwen2-VL ViT, or InternVL ViT? Initial lean: InternVL or Qwen2-VL since both are MoonViT-adjacent (similar patch_merger structure, Rope-style positional encoding). Decide by end of Phase C.
-- **D-sub-2: Grid mode.** Ship MoonViT baked at the canonical `(36, 46)` grid only (matches Phase 1 fusion contract), or expose dynamic grid support? Static is simpler and matches our deployment pattern (lane-axis frames are constant resolution). Recommendation pending: static.
-- **D-sub-3: Patch + merge dimensions.** TRT-LLM's vision encoder templates typically assume `patch_size=14` + `merge_kernel=2` (Qwen2-VL ViT convention) — does our MoonViT match exactly? If not, do we extend the template or pre-process inputs to fit?
-- **D-sub-4: Custom op coverage.** Do `Rope2DReal` position embeddings and `sdpa_packed` (without `cu_seqlens`) have direct TRT-LLM equivalents? If not, do we add custom plugins or fall back to PT-side equivalents pre-baked into weights? (See Risk R3.1.)
+- **D-sub-1: Base template choice.** **RESOLVED 2026-06-03:** SigLIP (forked from `tensorrt_llm/_torch/models/modeling_siglip.py`). Backbone dims match MoonViT exactly (patch=14, hidden=1152, layers=27, heads=16, head_dim=72, intermediate=4304); port reduces to a position-encoding swap only.
+- **D-sub-2: Grid mode.** **RESOLVED 2026-06-03:** Dynamic (interpolate_pos_encoding support). Adds ~2 days to Phase D but enables non-ISP camera grids and future-proofs the deployment.
+- **D-sub-3: Patch + merge dimensions.** **RESOLVED 2026-06-03:** Keep the projector inside `vision_encoder.engine` (mlp1 LayerNorm + Linear + GELU + Linear with 2×2 pixel-shuffle baked in). Single engine boundary; the engine output directly matches LLM `hidden_size=2048`.
+- **D-sub-4: Custom op coverage.** **RESOLVED 2026-06-03:** bf16 throughout (`torch.autocast(bfloat16)` at the encoder boundary). Matches the LLM bf16 path so there is one precision contract end-to-end.
 
 ---
 
