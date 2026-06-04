@@ -15,28 +15,106 @@ from __future__ import annotations
 import os
 from typing import Optional
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
 class MoonViTVisionEmbeddings(nn.Module):
-    """Replaces SiglipVisionEmbeddings.
+    """SigLIP-style embeddings with MoonViT's pos_emb_baked buffer.
 
-    TODO Port site 1 (Appendix A.1): delete self.position_embedding (nn.Embedding(num_positions, D))
-    and self.position_ids buffer; register self.pos_emb_baked of shape (L_pre, D) = (1656, 1152)
-    via permute(2,0,1).unsqueeze(0) -> F.interpolate(size=(grid_h, grid_w), mode="bicubic",
-    align_corners=False) -> squeeze(0).permute(1,2,0).flatten(end_dim=1); also store
-    self.L_pre_baked: int and self.grid_hws_baked: (1, 2) int32. Drop interpolate_pos_encoding branch.
-    TODO Port site 2 (Appendix A.2): forward(pixel_values: (B*L_pre=1656, 3, 14, 14)) ->
-    Conv2d -> (B*L_pre, D, 1, 1) -> view(B_times_L, D) -> add self.pos_emb_baked (broadcast over B)
-    -> view(B, L_pre, D) = (1, 1656, 1152) return. Site 5 caller keeps the (B*N, D) reshape;
-    do NOT preempt it here.
+    Site 1 + Site 2 of Phase D port. Replaces:
+      - HF SiglipVisionEmbeddings.position_embedding (nn.Embedding) -> register_buffer('pos_emb_baked', ...)
+      - forward: drops position_ids lookup; adds pos_emb_baked directly
+
+    DONE Port site 1 (Appendix A.1): registers self.pos_emb_baked of shape (L_pre, D)
+    baked from MoonViT vit.patch_embed.pos_emb.weight (H_max, W_max, D) via
+    permute(2,0,1).unsqueeze(0) -> F.interpolate(size=(grid_h, grid_w), mode="bicubic",
+    align_corners=False) -> squeeze(0).permute(1,2,0).flatten(end_dim=1). No
+    interpolate_pos_encoding branch; grid is baked at init.
+    DONE Port site 2 (Appendix A.2): forward(pixel_values: (L_pre, 3, P, P)) ->
+    Conv2d -> (L_pre, D, 1, 1) -> view(L_pre, D) -> add self.pos_emb_baked. The
+    outer MoonViTVisionTransformer (Site 5) handles the (B, L_pre, D) batch axis;
+    here we keep the pre-patchified (L_pre, ...) contract from export/vision.py:55-57.
     """
-    def __init__(self, config):
+    def __init__(self, hidden_size: int, patch_size: int, grid_h: int, grid_w: int,
+                 moonvit_pos_emb_weight: torch.Tensor):
         super().__init__()
-        raise NotImplementedError("MoonViTVisionEmbeddings: see phase_d_moonvit_port_delta.md")
+        # FAIL LOUD on shape mismatch (no silent coercion)
+        if moonvit_pos_emb_weight.ndim != 3:
+            raise RuntimeError(
+                f"moonvit_pos_emb_weight must be 3D (H_max, W_max, hidden_size); "
+                f"got shape {tuple(moonvit_pos_emb_weight.shape)}"
+            )
+        H_max, W_max, d = moonvit_pos_emb_weight.shape
+        if d != hidden_size:
+            raise RuntimeError(
+                f"moonvit_pos_emb_weight last dim {d} != hidden_size {hidden_size}"
+            )
+        if grid_h > H_max or grid_w > W_max:
+            raise RuntimeError(
+                f"requested grid ({grid_h},{grid_w}) exceeds source table ({H_max},{W_max})"
+            )
+
+        self.hidden_size = hidden_size
+        self.patch_size = patch_size
+        self.grid_h = grid_h
+        self.grid_w = grid_w
+        self.num_patches = grid_h * grid_w  # L_pre
+
+        # Conv2d patch embedding (matches MoonViT export/vision.py:55-57 + SigLIP)
+        self.patch_embedding = nn.Conv2d(
+            in_channels=3,
+            out_channels=hidden_size,
+            kernel_size=patch_size,
+            stride=patch_size,
+        )
+
+        # Bake pos_emb_baked from MoonViT source table via bicubic interpolation
+        # (matches export/vision.py:35-44 exactly)
+        pos = moonvit_pos_emb_weight.permute(2, 0, 1).unsqueeze(0)  # (1, d, H_max, W_max)
+        pos = F.interpolate(pos, size=(grid_h, grid_w), mode="bicubic", align_corners=False)
+        pos = pos.squeeze(0).permute(1, 2, 0).contiguous().flatten(end_dim=1)  # (L_pre, d)
+        if pos.shape != (self.num_patches, hidden_size):
+            raise RuntimeError(
+                f"baked pos_emb shape {tuple(pos.shape)} != expected ({self.num_patches},{hidden_size})"
+            )
+        self.register_buffer("pos_emb_baked", pos, persistent=True)
+        # FAIL LOUD on degenerate buffer (e.g. all zeros = uninitialized)
+        if torch.abs(pos).max().item() < 1e-6:
+            raise RuntimeError(
+                f"pos_emb_baked appears degenerate (max-abs < 1e-6); "
+                f"check moonvit_pos_emb_weight source"
+            )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        """pixel_values: (L_pre, 3, patch_size, patch_size) -- already patchified.
+
+        Returns (L_pre, hidden_size) tokens with pos_emb_baked added.
+
+        NOTE: pixel_values is pre-patchified (matches MoonViT contract). The
+        TRT-LLM SiglipVisionTransformer.forward expects (B*N, D) flattened, but
+        we work in (L_pre, D) with B=1 implicit. The outer MoonViTVisionTransformer
+        must thread this through correctly.
+        """
+        # FAIL LOUD on input shape mismatch
+        if pixel_values.ndim != 4:
+            raise RuntimeError(
+                f"pixel_values must be 4D (L_pre, 3, P, P); got {pixel_values.ndim}D"
+            )
+        L_pre = pixel_values.shape[0]
+        if L_pre != self.num_patches:
+            raise RuntimeError(
+                f"input L_pre={L_pre} != baked num_patches={self.num_patches} "
+                f"(dynamic grid not yet supported in MVP; Site 4 will add)"
+            )
+
+        # Conv2d on (L_pre, 3, P, P) -> (L_pre, hidden_size, 1, 1)
+        embeddings = self.patch_embedding(pixel_values).view(L_pre, self.hidden_size)
+
+        # Add baked positional embedding (no lookup, just broadcast across batch)
+        embeddings = embeddings + self.pos_emb_baked
+
+        return embeddings
 
 
 class MoonViTAttention(nn.Module):
