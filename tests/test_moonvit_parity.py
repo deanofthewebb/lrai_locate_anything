@@ -174,12 +174,12 @@ def test_full_forward_parity():
     # Mock mlp1 state dict for projector
     in_features = hidden_size * kh * kw  # 4608
     mlp1_sd = {
-        "norm.weight": torch.ones(in_features),
-        "norm.bias": torch.zeros(in_features),
-        "0.weight": torch.randn(text_hidden, in_features) * 0.02,
-        "0.bias": torch.zeros(text_hidden),
-        "2.weight": torch.randn(text_hidden, text_hidden) * 0.02,
-        "2.bias": torch.zeros(text_hidden),
+        "0.weight": torch.ones(in_features),
+        "0.bias": torch.zeros(in_features),
+        "1.weight": torch.randn(text_hidden, in_features) * 0.02,
+        "1.bias": torch.zeros(text_hidden),
+        "3.weight": torch.randn(text_hidden, text_hidden) * 0.02,
+        "3.bias": torch.zeros(text_hidden),
     }
 
     # Build module
