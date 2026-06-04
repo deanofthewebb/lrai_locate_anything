@@ -153,13 +153,20 @@ class LocateAnythingTRTLLMRunner:
 
         # 4. Load tokenizer + HF config (for image_token_index, eos_token_id,
         # special-token ids consumed by parse_boxes_with_labels).
-        from transformers import AutoTokenizer
+        from transformers import AutoTokenizer, AutoProcessor
         if not (hf_dir / "tokenizer_config.json").exists():
             raise FileNotFoundError(
                 f"tokenizer_config.json not found in {hf_dir}. "
                 f"Pass the HF checkpoint dir, not the TRT-LLM checkpoint dir."
             )
         self.tokenizer = AutoTokenizer.from_pretrained(
+            str(hf_dir), trust_remote_code=True
+        )
+        # PT-mode vision adapter needs the HF AutoProcessor (handles
+        # letterbox + normalization + grid_hws emission internally). TRT-mode
+        # does letterbox inside MoonViTAdapter._letterbox; processor is unused
+        # there but cheap to construct, so we always load it.
+        self.processor = AutoProcessor.from_pretrained(
             str(hf_dir), trust_remote_code=True
         )
         hf_cfg_path = hf_dir / "config.json"
@@ -272,9 +279,22 @@ class LocateAnythingTRTLLMRunner:
                 f"'Locate all the instances that matches the following description: <X>.'"
             )
 
-        # 2. Vision: PIL -> letterboxed patches -> vision_proj engine -> prompt_table.
-        # prompt_table is (1, L_post, hidden), already on CUDA in self.llm_dtype.
-        prompt_table, scale, pad_x, pad_y = self.vision.forward(image)
+        # 2. Vision: PIL -> prompt_table. Adapter return depends on vision_mode:
+        #   - PT mode: HF AutoProcessor handles preprocessing internally; the
+        #     adapter returns a bare (1, L_post, hidden) tensor. LocateAnything
+        #     emits bbox coords in the original PIL.size coordinate space, so
+        #     un-letterboxing is the identity.
+        #   - TRT mode: adapter returns (prompt_table, scale, pad_x, pad_y)
+        #     because it letterboxes internally; box coords come back in the
+        #     letterboxed engine resolution and must be un-warped.
+        if self.vision.vision_mode == "pt":
+            prompt_table = self.vision.forward(image, processor=self.processor)
+            # PIL.size space: parse with the original image dims, no un-letterbox.
+            parse_w, parse_h = image.size
+            scale, pad_x, pad_y = 1.0, 0, 0
+        else:
+            prompt_table, scale, pad_x, pad_y = self.vision.forward(image)
+            parse_w, parse_h = self.vision.img_w, self.vision.img_h
         L_post_actual = int(prompt_table.shape[1])
         if L_post_actual != self.L_post:
             raise RuntimeError(
@@ -325,19 +345,26 @@ class LocateAnythingTRTLLMRunner:
             new_ids = output_ids[0][0][prompt_len:]
         raw_text = self.tokenizer.decode(new_ids, skip_special_tokens=False)
 
-        # 6. Parse boxes and un-letterbox into ORIGINAL image pixel coords.
-        # parse_boxes returns coordinates scaled to the (W, H) we pass; we pass
-        # the engine resolution, then undo the letterbox transform.
-        boxes_lb = parse_boxes(raw_text, self.vision.img_w, self.vision.img_h)
+        # 6. Parse boxes and (TRT mode only) un-letterbox into ORIGINAL image
+        # pixel coords. parse_boxes returns coordinates scaled to the (W, H)
+        # we pass; for PT mode that is PIL.size (already final); for TRT mode
+        # we pass the letterboxed engine resolution and undo the transform.
+        boxes_lb = parse_boxes(raw_text, parse_w, parse_h)
         detections: List[Tuple[tuple, str]] = []
+        need_unwarp = self.vision.vision_mode == "trt" and (
+            scale != 1.0 or pad_x != 0 or pad_y != 0
+        )
         for ((x1, y1, x2, y2), label) in boxes_lb:
-            ox1 = (x1 - pad_x) / scale
-            oy1 = (y1 - pad_y) / scale
-            ox2 = (x2 - pad_x) / scale
-            oy2 = (y2 - pad_y) / scale
+            if need_unwarp:
+                ox1 = (x1 - pad_x) / scale
+                oy1 = (y1 - pad_y) / scale
+                ox2 = (x2 - pad_x) / scale
+                oy2 = (y2 - pad_y) / scale
+            else:
+                ox1, oy1, ox2, oy2 = x1, y1, x2, y2
             # Clip to the original image bounds (letterbox padding can produce
             # tiny negative or out-of-range coords for boxes that hugged the
-            # padded edge).
+            # padded edge; PT mode shouldn't but cheap to guard).
             ox1 = max(0.0, min(float(orig_w), ox1))
             oy1 = max(0.0, min(float(orig_h), oy1))
             ox2 = max(0.0, min(float(orig_w), ox2))
