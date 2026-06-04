@@ -275,13 +275,26 @@ class MoonViTAdapter:
 
         # The processor __call__ requires (a) a non-None text argument — line 480
         # of processing_locateanything.py does `text[0]` unconditionally when
-        # text is not a str, crashing when text=None; and (b) images as a list
-        # — the replace_media_placeholder loop slices images[start:] expecting
-        # a sequence, so a bare PIL Image raises 'Image object is not
-        # subscriptable'.  Pass the standard single-image placeholder and wrap
-        # the image in a list.
+        # text is not a str, crashing when text=None; (b) images as a list —
+        # the replace_media_placeholder loop slices images[start:] expecting a
+        # sequence, so a bare PIL Image raises 'Image object is not
+        # subscriptable'; and (c) the image must fit within the RoPE source
+        # table populated during _init_pt — rope.get_freqs_cis((64,64)) caps
+        # the per-axis grid at 64 tiles, so the image must be at most
+        # 64 * patch_size = 896 px on each side before tiling.  Resize if
+        # larger; aspect-ratio-preserving with BILINEAR.
+        _max_side = 64 * self._PATCH_SIZE  # 64 * 14 = 896
+        if not isinstance(image_pil, list):
+            _img = image_pil
+            if max(_img.size) > _max_side:
+                _scale = _max_side / max(_img.size)
+                _new_w = max(1, int(_img.width * _scale))
+                _new_h = max(1, int(_img.height * _scale))
+                _img = _img.resize((_new_w, _new_h), Image.Resampling.BILINEAR)
+            images_arg = [_img]
+        else:
+            images_arg = image_pil
         image_placeholder_text = getattr(processor, "image_placeholder", "image")
-        images_arg = image_pil if isinstance(image_pil, list) else [image_pil]
         inputs = processor(images=images_arg, text=f"<{image_placeholder_text}-1>", return_tensors="pt")
         pixel_values = inputs["pixel_values"].cuda()
         grid_hws = inputs.get("image_grid_hws", None)
