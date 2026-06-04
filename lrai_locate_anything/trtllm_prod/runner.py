@@ -357,7 +357,10 @@ class LocateAnythingTRTLLMRunner:
             prompt_table, scale, pad_x, pad_y = self.vision.forward(image)
             parse_w, parse_h = self.vision.img_w, self.vision.img_h
         L_post_actual = int(prompt_table.shape[1])
-        if L_post_actual != self.L_post:
+        # PT vision mode: L_post varies with image aspect ratio (AutoImageProcessor
+        # picks the grid). Only enforce the engine's prompt_table capacity ceiling.
+        # TRT-mode keeps the strict equality since the engine bakes a fixed grid.
+        if self.vision.vision_mode == "trt" and L_post_actual != self.L_post:
             raise RuntimeError(
                 f"vision adapter emitted L_post={L_post_actual} but runner expected "
                 f"{self.L_post} (grid={self.vision.grid_h}x{self.vision.grid_w}). "
