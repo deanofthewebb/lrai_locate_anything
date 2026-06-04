@@ -1416,9 +1416,9 @@ class _MoonViTPTAttentionBlock(nn.Module):
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
         scale = 1.0 / math.sqrt(Dh)
-        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
-        attn = torch.softmax(attn.float(), dim=-1).to(v.dtype)
-        out = torch.matmul(attn, v)
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0), scale=scale
+        ).squeeze(0)
         out = out.transpose(0, 1).contiguous().reshape(L_q, H * Dh)
 
         out = self.wo(out)
