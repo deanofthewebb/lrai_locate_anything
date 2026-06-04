@@ -279,12 +279,11 @@ class MoonViTAdapter:
         # text is not a str, crashing when text=None; (b) images as a list —
         # the replace_media_placeholder loop slices images[start:] expecting a
         # sequence, so a bare PIL Image raises 'Image object is not
-        # subscriptable'; and (c) the image must fit within the RoPE source
-        # table populated during _init_pt — rope.get_freqs_cis((64,64)) caps
-        # the per-axis grid at 64 tiles, so the image must be at most
-        # 64 * patch_size = 896 px on each side before tiling.  Resize if
-        # larger; aspect-ratio-preserving with BILINEAR.
-        _max_side = 64 * self._PATCH_SIZE  # 64 * 14 = 896
+        # subscriptable'; and (c) the LLM engine's max_prompt_embedding_table_size
+        # caps L_post = (grid_h//2) * (grid_w//2) at 414 = (36//2)*(46//2)*... so
+        # the grid must stay ≤ 36×46 (canonical). max_side=644 keeps width at the
+        # canonical 46 tiles; aspect-ratio-preserving with BILINEAR.
+        _max_side = 46 * self._PATCH_SIZE  # 46 * 14 = 644
         if not isinstance(image_pil, list):
             _img = image_pil
             if max(_img.size) > _max_side:
