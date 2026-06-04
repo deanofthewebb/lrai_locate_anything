@@ -78,6 +78,17 @@ def _segments_intersect(p1, p2, p3, p4) -> bool:
     return False
 
 
+# Number of *processed* frames to paint a line in flash-color after a crossing.
+# Processed frames run at --target-fps, so FLASH_FRAMES=6 at 5 fps = ~1.2 s of
+# visual feedback — long enough to see on playback without being distracting.
+_FLASH_FRAMES_DEFAULT = 6
+
+# Flash color: bright yellow (BGR).  Chosen to contrast with the default blue
+# line color (255, 0, 0) and the green bounding boxes (0, 255, 0).
+_FLASH_COLOR = (0, 220, 255)
+_DEFAULT_LINE_COLOR = (255, 0, 0)
+
+
 @dataclass
 class LineConfig:
     line_id: str
@@ -89,6 +100,10 @@ class LineConfig:
     out_count: int = 0
     # per-track most-recent direction credited (for coalesce dedup)
     last_dir: Dict[int, str] = field(default_factory=dict)
+    # Flash overlay: set to (processed_frame + FLASH_FRAMES) on any crossing.
+    # The overlay writer compares the current processed_frame_count against this
+    # field to decide whether to paint in flash-color.
+    flash_until_frame: int = -1
 
 
 def _build_line_configs(lines_json_path: Path) -> List[LineConfig]:
@@ -108,10 +123,16 @@ def _build_line_configs(lines_json_path: Path) -> List[LineConfig]:
 
 
 def _evaluate_line(line: LineConfig, track_id: int, track_class: str,
-                   prev_pt, curr_pt, frame: int, ts: float) -> List[dict]:
+                   prev_pt, curr_pt, frame: int, ts: float,
+                   processed_frame_count: int = 0,
+                   flash_frames: int = _FLASH_FRAMES_DEFAULT) -> List[dict]:
     """Check every segment of `line` for a crossing on the `prev_pt → curr_pt`
     motion vector. Apply anchor-side polarity and coalesce dedup. Returns
-    CSV rows (one per crossing event)."""
+    CSV rows (one per crossing event).
+
+    When a crossing is emitted, line.flash_until_frame is updated so the
+    overlay writer can paint the line in flash-color for the next N processed
+    frames."""
     rows = []
     for seg_a, seg_b in line.segments:
         if not _segments_intersect(prev_pt, curr_pt, seg_a, seg_b):
@@ -140,6 +161,10 @@ def _evaluate_line(line: LineConfig, track_id: int, track_class: str,
             line.in_count += 1
         else:
             line.out_count += 1
+
+        # Flash: extend the flash window on every crossing event.
+        line.flash_until_frame = processed_frame_count + flash_frames
+
         rows.append({
             "frame": frame, "timestamp_s": f"{ts:.3f}",
             "line_id": line.line_id, "line_name": line.name,
@@ -367,11 +392,18 @@ def main() -> int:
                          "before detect() (vision-attention memory caps VRAM-limited GPUs). "
                          "Boxes are rescaled back to ORIGINAL frame pixel space for "
                          "tracker_bot CSV compatibility. Typical: 1280 for 2080 Ti.")
-    ap.add_argument("--tracker", default="bytetrack", choices=("bytetrack", "greedy"),
-                    help="Multi-object tracker. bytetrack uses supervision.ByteTrack "
-                         "(recommended for production — 2-stage association + Kalman "
-                         "preserves identity through occlusions). greedy is the legacy "
-                         "GreedyIoUTracker kept as a fallback for one cycle.")
+    ap.add_argument("--tracker", default="bytetrack",
+                    choices=("bytetrack", "greedy", "trackerbot"),
+                    help="Multi-object tracker. "
+                         "bytetrack (default): supervision.ByteTrack — 2-stage "
+                         "association + Kalman, recommended for reproducibility of "
+                         "prior audit runs. "
+                         "trackerbot: vendored canonical SafeTunnel ByteTracker from "
+                         "tracker_bot/src/safetunnel/core/tracking/bytetrack.py — "
+                         "numpy-only, no safetunnel/ultralytics dep, bitwise-identical "
+                         "association + Kalman logic to the prod tracker. Use when "
+                         "comparing against prod tracker_bot counts. "
+                         "greedy: legacy GreedyIoUTracker kept as a fallback.")
     ap.add_argument("--vision-mode", choices=["pt", "trt"], default="pt",
                     help="vision encoder mode for --path trtllm (default: pt)")
     args = ap.parse_args()
@@ -474,9 +506,15 @@ def main() -> int:
     lines_cfg = _build_line_configs(args.lines)
     if args.tracker == "bytetrack":
         tracker = ByteTracker(frame_rate=args.target_fps)
+    elif args.tracker == "trackerbot":
+        from lrai_locate_anything.audit.trackerbot_compat import ByteTrackerAuditWrapper
+        tracker = ByteTrackerAuditWrapper(frame_rate=args.target_fps)
     else:
         tracker = GreedyIoUTracker()
-    print(f"[audit] tracker={args.tracker}", file=sys.stderr)
+    # Flash duration in processed frames: default = 6 frames at target_fps
+    # (≈1.2 s at 5 fps, ≈0.4 s at 15 fps).  Exposed here for easy tuning.
+    flash_frames = max(1, int(round(args.target_fps * 1.2)))
+    print(f"[audit] tracker={args.tracker}  flash_frames={flash_frames}", file=sys.stderr)
     rows: List[dict] = []
     inference_time = 0.0
     n_inferences = 0
@@ -500,6 +538,7 @@ def main() -> int:
 
     t_start = time.time()
     frame_idx = 0
+    processed_frame_count = 0  # increments only on frames we actually process
     last_print = t_start
     while True:
         ok, bgr = cap.read()
@@ -556,7 +595,11 @@ def main() -> int:
             # Bucket OOV (unrecognized) labels into "other" for the running tally
             bucket = tcls if tcls in in_per_class else "other"
             for ln in lines_cfg:
-                new_rows = _evaluate_line(ln, tid, tcls, prev_c, curr_c, frame_idx, ts)
+                new_rows = _evaluate_line(
+                    ln, tid, tcls, prev_c, curr_c, frame_idx, ts,
+                    processed_frame_count=processed_frame_count,
+                    flash_frames=flash_frames,
+                )
                 for r in new_rows:
                     if r["direction"] == "IN":
                         in_per_class[bucket] += 1
@@ -591,10 +634,19 @@ def main() -> int:
                 cv2.putText(bgr, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
                             0.55, (255, 255, 255), 1, cv2.LINE_AA)
             for ln in lines_cfg:
+                # Flash: paint in flash-color for N processed frames after a
+                # crossing; otherwise use the default blue line color.
+                line_color = (
+                    _FLASH_COLOR
+                    if processed_frame_count < ln.flash_until_frame
+                    else _DEFAULT_LINE_COLOR
+                )
                 for (a, b) in ln.segments:
-                    cv2.line(bgr, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])), (255, 0, 0), 2)
+                    cv2.line(bgr, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                             line_color, 2)
             writer.write(bgr)
 
+        processed_frame_count += 1
         # Progress
         if time.time() - last_print > 15.0:
             elapsed = time.time() - t_start
