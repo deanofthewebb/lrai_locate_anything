@@ -372,6 +372,8 @@ def main() -> int:
                          "(recommended for production — 2-stage association + Kalman "
                          "preserves identity through occlusions). greedy is the legacy "
                          "GreedyIoUTracker kept as a fallback for one cycle.")
+    ap.add_argument("--vision-mode", choices=["pt", "trt"], default="pt",
+                    help="vision encoder mode for --path trtllm (default: pt)")
     args = ap.parse_args()
 
     # Lazy import so --help works without torch
@@ -397,25 +399,29 @@ def main() -> int:
         from lrai_locate_anything.trtllm_prod.runner import LocateAnythingTRTLLMRunner
         engine_dir = Path(args.engine_dir)
         llm_engine_path = engine_dir / "llm.engine"
-        vision_engine_path = engine_dir / "vision_encoder.engine"
         if not llm_engine_path.exists():
             # ModelRunner.from_dir accepts the directory directly; fall back to
             # passing the engine_dir itself so the runner can resolve rank0.engine.
             llm_engine_path = engine_dir
-        if not vision_engine_path.exists():
-            raise FileNotFoundError(
-                f"vision_encoder.engine not found at {vision_engine_path}. "
-                f"Phase D build (export_prod) is required for --path trtllm."
-            )
-        # vision_mode='pt' keeps the MoonViT+projector vision tower on the PT
-        # path (HF weights from weights_dir) while the LLM runs through the
-        # TRT-LLM ModelRunner. The fused vision_encoder.engine path is the
-        # alternate mode once Phase D vision export is validated.
+        # Default to PT vision mode — vision_encoder.engine only required for
+        # TRT vision mode. vision_mode='pt' keeps the MoonViT+projector vision
+        # tower on the PT path (HF weights from weights_dir) while the LLM runs
+        # through the TRT-LLM ModelRunner. The fused vision_encoder.engine
+        # path is the alternate mode once Phase D vision export is validated.
+        vision_mode = getattr(args, "vision_mode", "pt")
+        vision_engine_path = None
+        if vision_mode == "trt":
+            vision_engine_path = engine_dir / "vision_encoder.engine"
+            if not vision_engine_path.exists():
+                raise FileNotFoundError(
+                    f"vision_encoder.engine not found at {vision_engine_path}. "
+                    "Phase D build (export_prod) is required for --vision-mode trt."
+                )
         runner = LocateAnythingTRTLLMRunner(
             llm_engine_path=llm_engine_path,
             vision_proj_engine_path=vision_engine_path,
             hf_dir=args.weights,
-            vision_mode='pt',
+            vision_mode=vision_mode,
             weights_dir=args.weights,
         )
         model = None  # unused on this path
