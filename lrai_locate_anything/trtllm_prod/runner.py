@@ -125,10 +125,37 @@ class LocateAnythingTRTLLMRunner:
             build_cfg.get("max_prompt_embedding_table_size", 0)
         )
         if self.max_prompt_embedding_table_size == 0:
+            # Check whether a sibling .new engine exists that was rebuilt with
+            # the correct flag (rebuild_llm_bf16.sh writes to <dir>.new first).
+            new_engine_dir = engine_dir.parent / (engine_dir.name + ".new")
+            if new_engine_dir.is_dir():
+                new_cfg_path = new_engine_dir / "config.json"
+                if new_cfg_path.exists():
+                    import json as _json
+                    _nc = _json.loads(new_cfg_path.read_text())
+                    _new_tbl = int(
+                        _nc.get("build_config", {})
+                        .get("max_prompt_embedding_table_size", 0)
+                    )
+                    if _new_tbl > 0:
+                        raise RuntimeError(
+                            f"Engine at {engine_dir} was built without "
+                            f"max_prompt_embedding_table_size (got 0). "
+                            f"A correctly-rebuilt engine is available at "
+                            f"{new_engine_dir} (max_prompt_embedding_table_size="
+                            f"{_new_tbl}). Promote it with:\n"
+                            f"  mv {engine_dir} {engine_dir}.old && "
+                            f"mv {new_engine_dir} {engine_dir}\n"
+                            f"then re-run this command."
+                        )
             raise RuntimeError(
                 f"Engine at {engine_dir} was built without "
                 f"max_prompt_embedding_table_size. Vision-prompt injection "
-                f"requires this to be > 0 (see build.build_llm_engine)."
+                f"requires this to be > 0. Rebuild with:\n"
+                f"  trtllm-build --checkpoint_dir <ckpt> --output_dir {engine_dir} "
+                f"--max_prompt_embedding_table_size <L_post> ...\n"
+                f"where L_post = (grid_h // 2) * (grid_w // 2) = 414 for the "
+                f"default 36x46 grid (see build.build_llm_engine)."
             )
         # vocab_size = real text vocab; virtual prompt slots start at vocab_size.
         pretrained_cfg = engine_cfg.get("pretrained_config", {})
