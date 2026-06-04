@@ -98,6 +98,206 @@ The MVP bakes `(grid_h, grid_w)` at construction — same contract as `VisionFor
 
 ---
 
+## Appendix A — Tightened Site Specs
+
+These specs are the concrete shape contracts produced by the parallel deep-dive on each port site. The corresponding `# TODO Port site N` markers in `lrai_locate_anything/trtllm_prod/modeling_moonvit.py` reference the section IDs below (A.1 through A.6). When implementing, prefer these specs over the higher-level prose in section 2 — these resolve the actual shape/dtype/broadcasting ambiguities that surfaced during the prep pass.
+
+Canonical baked dims (one-shot MVP engine, aspect-ratio bucket 36x46):
+- `B = 1` (single-image vision-only, no KV cache).
+- `L_pre = grid_h * grid_w = 36 * 46 = 1656` tokens after patchification.
+- `D = config.hidden_size = 1152` (SigLIP-So400m).
+- `H = config.num_attention_heads = 16`.
+- `D_head = D / H = 72`.
+- `kh = kw = 2` (StaticPatchMerger), so `L_post = L_pre / (kh*kw) = 414`, projector-in dim = `kh*kw*D = 4608`.
+- `text_hidden = 2048` (LM-side hidden, used by `mlp1` projector).
+
+---
+
+### Site 1 (SiglipVisionEmbeddings.__init__) — Concrete spec
+
+**Buffers registered at init:**
+- `self.pos_emb_baked`: `(L_pre, D) = (1656, 1152)`, dtype = module dtype (bf16 at runtime, fp32 source weight, cast at register time). Baked from MoonViT `vit.patch_embed.pos_emb.weight` of shape `(H_max, W_max, D)` via:
+  - `w = weight.permute(2, 0, 1).unsqueeze(0)` -> `(1, D, H_max, W_max)`
+  - `w = F.interpolate(w, size=(grid_h, grid_w), mode="bicubic", align_corners=False)` -> `(1, D, grid_h, grid_w)`
+  - `pos_emb_baked = w.squeeze(0).permute(1, 2, 0).flatten(end_dim=1)` -> `(L_pre, D)`
+- `self.grid_hws_baked`: `(1, 2)` int32, just stored for VisionForExport parity (Site 3/4 RoPE reads from a separate freqs buffer).
+- `self.L_pre_baked`: python int (not a buffer), used by forward to recover B.
+
+**Removed from stock SigLIP:**
+- `self.position_embedding = nn.Embedding(num_positions, embed_dim)` — deleted.
+- `self.register_buffer("position_ids", torch.arange(num_positions).expand((1, -1)), persistent=False)` — deleted.
+
+**Edge cases:**
+- Source weight dtype is fp32; cast to module dtype after interpolation, not before, to avoid bf16 bicubic accuracy loss.
+- `interpolate_pos_encoding` branch is dead — grid is baked, so the kwarg path is removed entirely (also from the forward signature in Site 2).
+
+**Residual risks (resolve in code):**
+- Whether `pos_emb_baked` should be persistent: default `persistent=True` so checkpointing carries it; flip to `False` only if we adopt the dynamic-grid re-bake path.
+- Dtype storage tradeoff (fp32 stable add vs bf16 memory) — punt to runtime decision after first parity run.
+
+---
+
+### Site 2 (SiglipVisionEmbeddings.forward) — Concrete spec
+
+**Input contract (differs from stock SigLIP):**
+- `pixel_values`: `(B*L_pre, 3, 14, 14)`, bf16/fp16, pre-patchified by orchestrator. NOT `(B, 3, H, W)`.
+
+**Tensor shapes at each step:**
+- After `patch_embedding(pixel_values)` (Conv2d 3->1152, k=14, s=14): `(B*L_pre, 1152, 1, 1)`.
+- After `.view(B_times_L, -1)`: `(B*L_pre, 1152)`.
+- `self.pos_emb_baked`: `(L_pre, 1152)`.
+- After broadcast add (B=1 fast path): `(L_pre, 1152)`.
+- After final `.view(B, L_pre, D)`: `(1, 1656, 1152)` — this is the shape contract returned to `SiglipVisionTransformer.forward`.
+
+**Code skeleton:**
+```python
+def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+    B_times_L = pixel_values.shape[0]
+    assert B_times_L % self.L_pre_baked == 0, \
+        f"got {B_times_L} tokens, not divisible by baked L_pre={self.L_pre_baked}"
+    B = B_times_L // self.L_pre_baked
+
+    x = self.patch_embedding(pixel_values)        # (B*L_pre, D, 1, 1)
+    x = x.view(B_times_L, -1)                      # (B*L_pre, D)
+
+    if B == 1:
+        x = x + self.pos_emb_baked                 # (L_pre, D) + (L_pre, D)
+    else:
+        x = x.view(B, self.L_pre_baked, -1)
+        x = x + self.pos_emb_baked.unsqueeze(0)    # (B, L_pre, D)
+        x = x.view(B_times_L, -1)
+
+    return x.view(B, self.L_pre_baked, -1)         # (B, L_pre, D)
+```
+
+**Edge cases:**
+- We DO return `(B, L_pre, D)` to preserve the `SiglipVisionTransformer.forward` contract (modeling_siglip.py:51-53). Site 5 (caller) keeps its reshape to `(B*N, D)` for `CLIPEncoder`/`AttentionMetadata`. Do NOT preempt the reshape here.
+- `interpolate_pos_encoding` kwarg removed from signature.
+- `B == 1` fast path avoids an unnecessary `unsqueeze`+`view` pair on the hot path.
+
+**Residual risks (resolve in code):**
+- Whether the TRT-LLM multimodal-engine builder traces with `(B, 3, H, W)` dummy — we override the dummy in `build.py` (Site 6 cross-ref) to a `(L_pre, 3, 14, 14)` tensor.
+
+---
+
+### Site 3 (CLIPAttention.forward) — Concrete spec
+
+**Tensor shapes at each step (B=1, T=L_pre=1656, H=16, D_head=72):**
+- `hidden_states` in: `(B*T, D) = (1656, 1152)` after Site 5's reshape (per `CLIPEncoder` contract).
+- `q = self.q_proj(hidden_states)`: `(B*T, D) = (1656, 1152)`.
+- `q.view(B, T, H, D_head)`: `(1, 1656, 16, 72)`.
+- `q.transpose(1, 2)`: `(B, H, T, D_head) = (1, 16, 1656, 72)` (SDPA layout).
+- Same for `k`, `v`.
+
+**RoPE freq shapes:**
+- `self.freqs_cos`, `self.freqs_sin`: `(L_pre, D_head/2) = (1656, 36)` (pre-flattened at init from `(grid_h, grid_w, D_head/2)`).
+- For broadcast against `(B, H, T, D_head/2)` (the half-dim view of q/k inside `apply_rope_real`): reshape freqs to `(1, 1, L_pre, D_head/2)` — i.e. `unsqueeze(0).unsqueeze(0)`. NOT `unsqueeze(-2)`; that pattern was for the `(L, H, D_head/2)` packed layout in MoonViT canonical. SigLIP's `(B, H, T, D_head)` puts the head axis at dim=1, not dim=-2.
+
+**Code skeleton:**
+```python
+# After q,k,v projection but before SDPA
+B, T, _ = hidden_states.shape[0] // self.L_pre_baked, self.L_pre_baked, None
+# (or recover B,T from hidden_states.view(B, T, D) — see Site 5 contract)
+
+q = self.q_proj(hidden_states).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+k = self.k_proj(hidden_states).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+v = self.v_proj(hidden_states).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+# q, k, v each: (B, H, T, D_head)
+
+# 2D real RoPE — freqs broadcast over batch and head axes.
+freqs_cos = self.freqs_cos.view(1, 1, T, self.head_dim // 2)  # (1, 1, T, D_head/2)
+freqs_sin = self.freqs_sin.view(1, 1, T, self.head_dim // 2)
+q, k = apply_rope_real(q, k, freqs_cos, freqs_sin)  # same (B, H, T, D_head)
+
+# Then standard SigLIP SDPA path.
+attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
+# (B, H, T, D_head) -> (B, T, D) -> o_proj
+attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.embed_dim)
+out = self.o_proj(attn_out)
+```
+
+**Edge cases:**
+- `apply_rope_real` splits `q` into `(q_real, q_imag)` along the last dim (pairs of consecutive channels). Verify pairing convention matches MoonViT canonical (`patches.py:apply_rope_real`) — half-then-half vs interleaved is a silent failure.
+- fp32 RoPE math, then cast back to module dtype before SDPA (matches MoonViT canonical for numerical stability).
+- `o_proj` keeps `bias=True` from stock SigLIP — no change.
+
+**Residual risks (resolve in code):**
+- Whether to recover `B`, `T` from `hidden_states.shape` directly or rely on a baked `self.L_pre_baked`. If the encoder loop passes `(B, T, D)` (not yet flattened to `(B*T, D)`), the view ops simplify — depends on Site 5's exact reshape decision.
+- Freq-buffer placement: per-layer copy vs shared on the encoder root. MVP uses per-layer to keep `CLIPEncoderLayer.forward` signature untouched.
+
+---
+
+### Site 4 (CLIPAttention.__init__) — Concrete spec
+
+**Buffers registered at init (one set per attention layer):**
+- `self.freqs_cos`: `(L_pre, D_head/2) = (1656, 36)`, fp32.
+- `self.freqs_sin`: `(L_pre, D_head/2) = (1656, 36)`, fp32.
+
+**Construction:**
+- `freqs_cis = Rope2DReal(D_head, max_grid_h, max_grid_w).get_freqs_cis(grid_h, grid_w)`. Returns `(grid_h, grid_w, D_head/2, 2)` (last axis = (cos, sin)).
+- `freqs_cos, freqs_sin = freqs_cis.unbind(-1)` — each `(grid_h, grid_w, D_head/2)`.
+- Flatten: `freqs_cos = freqs_cos.flatten(end_dim=1)`, same for sin — each becomes `(L_pre, D_head/2)`.
+- Register both as non-persistent buffers (re-baked from config each construction).
+
+**Edge cases:**
+- All N=27 layers share identical freqs (the 2D-RoPE table is position-only, not layer-specific). Per-layer copy wastes ~27 * 1656 * 36 * 4 = 6.4 MB fp32 but avoids touching `CLIPEncoderLayer.forward(self, hidden_states, attention_mask)` to add a `freqs=` kwarg.
+- fp32 storage is intentional — `apply_rope_real` consumes fp32 freqs and computes in fp32, then casts back.
+
+**Residual risks (resolve in code):**
+- If TRT-LLM's `CLIPAttention` base does NOT round-trip arbitrary buffers through its `Attention` mixin, may need to register on a sibling `nn.Module` and pass into `forward` via a captured closure. Verify on first build.
+
+---
+
+### Site 5 (SiglipVisionTransformer) — Concrete spec
+
+**Init changes:**
+- `self.post_layernorm = nn.Identity()` — MoonViT has no trailing LN. We do NOT delete the attribute; the HF parent constructor sets it and downstream code may probe `hasattr`. Setting to `Identity()` is the minimal-diff fix.
+- `interpolate_pos_encoding` argument removed from forward signature.
+
+**Forward shape contract:**
+- Input `pixel_values`: `(B*L_pre, 3, 14, 14)` (matches Site 2's input).
+- `hidden_states = self.embeddings(pixel_values)`: `(B, L_pre, D) = (1, 1656, 1152)` (per Site 2 return contract).
+- Reshape for encoder: `hidden_states.view(B * L_pre, D) = (1656, 1152)` if the encoder expects packed `(B*T, D)`; OR keep `(B, L_pre, D)` if the encoder expects standard `(B, T, D)`. CLIPEncoder takes `(B, T, D)` — preserve it.
+- Encoder out: `(B, L_pre, D)`.
+- `last_hidden_state = self.post_layernorm(encoder_out)`: `(B, L_pre, D)` — Identity passthrough.
+- Return: `(B, L_pre, D)` matching HF return contract.
+
+**Edge cases:**
+- `B=1` is implicit but we still emit a batch axis so downstream `MoonViTOnSiglip` (Site 6) can run the patch merger on `(B, L_pre, D)` -> `(B, L_post, kh*kw*D)`.
+
+**Residual risks (resolve in code):**
+- TRT plugin baking the LN — even with `Identity` in PT-eager, the plugin may still have an LN slot. May need to load identity weights (gamma=1, beta=0) into the plugin's LN parameters at engine-build time.
+
+---
+
+### Site 6 (MoonViTOnSiglip wrapper + projector) — Concrete spec
+
+**Composition:**
+- `self.vision_model = SiglipVisionTransformer(config)` — patched with sites 1-5.
+- `self.patch_merger = StaticPatchMerger(merge_kh=2, merge_kw=2, grid_h=36, grid_w=46)`.
+- `self.projector = _build_projector_from_mlp1(moonvit_model.mlp1)` — copies sub-modules directly.
+
+**Tensor shapes through the pipeline:**
+- Vision-model out: `(B, L_pre, D) = (1, 1656, 1152)`.
+- Patch merger reshape chain: `(B, L_pre, D) -> (B, nh, kh, nw, kw, D) = (1, 18, 2, 23, 2, 1152) -> permute(0, 1, 3, 2, 4, 5) -> view(B, nh*nw, kh*kw*D) = (1, 414, 4608)`.
+- Projector in: `(B, L_post, 4608) = (1, 414, 4608)`.
+- Projector layers: `LayerNorm(4608) -> Linear(4608, 2048) -> GELU -> Linear(2048, 2048)`.
+- Projector out: `(B, L_post, text_hidden) = (1, 414, 2048)`.
+
+**Autocast wrapper (Site 7):**
+- `with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=self.use_bf16):` around the entire forward body.
+- RoPE freqs stay fp32 — `apply_rope_real` handles the float-up/down internally.
+- `pos_emb_baked` stored fp32, cast on the add.
+
+**Edge cases:**
+- `StaticPatchMerger` assumes `grid_h % kh == 0` and `grid_w % kw == 0` — assert at init for 36x46 / 2x2.
+- The permute order MUST be `(0, 1, 3, 2, 4, 5)` (nh, nw, kh, kw) not `(0, 2, 1, 3, 4, 5)` (nh, kh, nw, kw). MoonViT canonical uses `(nh, nw, kh, kw)` ordering for the merge; getting this wrong shuffles tokens silently.
+
+**Residual risks (resolve in code):**
+- Projector activation: MoonViT canonical may use `gelu` or `gelu_pytorch_tanh`; copy directly from `mlp1` sub-modules rather than reconstructing from config to avoid the activation-string trap.
+
+---
+
 ## 7. Risks
 
 1. **TRT-LLM SigLIP plugin signature**: the stock plugin may require `(B, N, D)` token shape and a static `num_positions` derived from `image_size // patch_size`. Our `(L_pre, D)` no-batch contract may force a wrapper that unsqueezes/squeezes around the plugin call, OR a re-export of the plugin with a custom token-count axis.
