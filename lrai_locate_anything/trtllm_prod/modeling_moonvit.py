@@ -1268,7 +1268,13 @@ class _PTBlockFreqsProxy(nn.Module):
     """
     def __init__(self, parent, freqs_source):
         super().__init__()
-        self._parent = parent
+        # Use object.__setattr__ to store the parent block reference as a plain
+        # Python attribute, bypassing nn.Module.__setattr__ which would register
+        # it as a child module and create a cycle:
+        #   _MoonViTPTAttentionBlock.attention -> _PTBlockFreqsProxy._parent -> block
+        # That cycle causes RecursionError in Module._apply (via named_children)
+        # when .cuda() or .eval() is called on the vision model.
+        object.__setattr__(self, "_parent", parent)
         # Full source table: (H_max, W_max, D_head/2, 2), last dim packs (cos, sin).
         self.register_buffer("freqs_source", freqs_source, persistent=False)
         # Current slice exposed as vendor-compatible cos/sin buffers.
