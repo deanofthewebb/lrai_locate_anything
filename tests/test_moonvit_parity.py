@@ -56,10 +56,90 @@ def test_embeddings_parity():
     assert max_diff < 5e-4, f"forward parity max-diff {max_diff:.6f} > 5e-4"
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
 def test_attention_parity():
-    """Asserts MoonViTAttention with apply_rope_real matches our patches.py:sdpa_packed."""
-    pass
+    """Sites 3+4 parity: MoonViTAttention.apply_rope produces the same q, k
+    tensors as a direct patches.apply_rope_real call.
+
+    PT-only — does NOT import tensorrt_llm so it runs on Mac.
+
+    Strategy: the module-level _moonvit_apply_rope helper is the exact
+    function bound onto the dynamically-built MoonViTAttention_TRTLLM
+    subclass (modeling_moonvit.py:311). We invoke it against a minimal
+    duck-typed `self` (no TRT-LLM base in MRO) so the rotation math runs
+    on plain torch tensors — this is the documented testing seam (see the
+    class docstring at modeling_moonvit.py:237-241).
+
+    Scope: this test asserts THAT our override forwards to patches.apply_rope_real
+    correctly. The full TRT-LLM forward path (split_qkv/convert_qkv against the
+    real Attention base) is covered by test_phase_d_parity_container.py (future).
+    """
+    import torch
+    from lrai_locate_anything.patches import apply_rope_real as patches_apply_rope_real
+    from lrai_locate_anything.trtllm_prod.modeling_moonvit import _moonvit_apply_rope
+
+    # Synthetic tensors matching MoonViT contract (1656 tokens, 16 heads, head_dim 72)
+    grid_h, grid_w = 36, 46
+    L = grid_h * grid_w  # 1656
+    H = 16               # num_heads
+    D_head = 72          # 1152 / 16
+
+    torch.manual_seed(0)
+    # Fused (L, H*D_head) layout — _moonvit_apply_rope expects this and reshapes.
+    q_fused = torch.randn(L, H * D_head, dtype=torch.float32) * 0.02
+    k_fused = torch.randn(L, H * D_head, dtype=torch.float32) * 0.02
+    v_fused = torch.randn(L, H * D_head, dtype=torch.float32) * 0.02
+
+    # fp32 cos/sin buffers (production stores fp32; cast happens inside override)
+    freqs_cos = torch.randn(L, D_head // 2, dtype=torch.float32)
+    freqs_sin = torch.randn(L, D_head // 2, dtype=torch.float32)
+
+    # --- Reference: replicate the override's data path WITHOUT routing through
+    # _moonvit_apply_rope. Reshape -> pack freqs -> call patches.apply_rope_real
+    # in q's dtype (matches override cast at modeling_moonvit.py:204-205).
+    q_ref_in = q_fused.clone().reshape(L, H, D_head)
+    k_ref_in = k_fused.clone().reshape(L, H, D_head)
+    fc_cast = freqs_cos.to(q_ref_in.dtype)
+    fs_cast = freqs_sin.to(q_ref_in.dtype)
+    freqs_packed = torch.stack([fc_cast, fs_cast], dim=-1)
+    q_ref, k_ref = patches_apply_rope_real(q_ref_in, k_ref_in, freqs_packed)
+    q_ref = q_ref.reshape(L, H * D_head)
+    k_ref = k_ref.reshape(L, H * D_head)
+
+    # --- Tested: invoke the actual override via a minimal duck-typed self.
+    # split_qkv is a pass-through for already-split tensors (VANILLA backend
+    # has support_fused_qkv=False); convert_qkv re-fuses for return.
+    class _MockAttention:
+        def __init__(self):
+            self.num_heads = H
+            self.head_dim = D_head
+            self.freqs_cos = freqs_cos
+            self.freqs_sin = freqs_sin
+            self.grid_h = grid_h
+            self.grid_w = grid_w
+
+        def split_qkv(self, q, k, v):
+            return q, k, v
+
+        def convert_qkv(self, q, k, v):
+            return q, k, v
+
+    mock_self = _MockAttention()
+    q_test, k_test, v_test = _moonvit_apply_rope(
+        mock_self,
+        q_fused.clone(),
+        k_fused.clone(),
+        v_fused.clone(),
+        position_ids=None,
+    )
+
+    max_diff_q = (q_ref - q_test).abs().max().item()
+    max_diff_k = (k_ref - k_test).abs().max().item()
+    max_diff_v = (v_fused - v_test).abs().max().item()
+
+    assert max_diff_q < 1e-6, f"q diff {max_diff_q:.6e}"
+    assert max_diff_k < 1e-6, f"k diff {max_diff_k:.6e}"
+    # v must pass through untouched — rotation is q/k only.
+    assert max_diff_v == 0.0, f"v was mutated: max-diff {max_diff_v:.6e}"
 
 
 @pytest.mark.skip(reason=_SKIP_REASON)

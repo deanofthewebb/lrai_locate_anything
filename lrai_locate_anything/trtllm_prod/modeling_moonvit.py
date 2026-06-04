@@ -117,26 +117,236 @@ class MoonViTVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class MoonViTAttention(nn.Module):
-    """Replaces SiglipAttention with 2D-RoPE application before SDPA.
+def _resolve_trtllm_attention_base():
+    """Lazy-import TRT-LLM's Attention so this file stays importable on Mac.
 
-    TODO Port site 3 (Appendix A.3): q,k,v each (B=1, H=16, T=L_pre=1656, D_head=72)
-    after view(B, T, H, D_head).transpose(1, 2); self.freqs_cos/self.freqs_sin are
-    (L_pre, D_head/2) = (1656, 36); reshape to (1, 1, T, D_head/2) before broadcast
-    over batch and head axes (NOT unsqueeze(-2) — head axis is at dim=1, not dim=-2).
-    Call apply_rope_real(q, k, freqs_cos, freqs_sin) in fp32 then cast back to module
-    dtype before scaled_dot_product_attention. o_proj keeps bias=True.
-    TODO Port site 4 (Appendix A.4): in __init__, build Rope2DReal(D_head=72, max_grid_h,
-    max_grid_w).get_freqs_cis(grid_h=36, grid_w=46) -> (36, 46, 36, 2); unbind(-1) ->
-    freqs_cos/freqs_sin each (36, 46, 36); flatten(end_dim=1) -> (L_pre=1656, 36);
-    register both as fp32 non-persistent buffers (~6.4 MB shared across 27 layers).
+    Returns the Attention class. Raises ImportError with a clear message if
+    tensorrt_llm isn't installed. We import inside __init__ rather than at
+    module import time so tests/test_moonvit_parity.py can introspect the
+    class layout from a PT-only host.
     """
-    def __init__(self, config):
-        super().__init__()
-        raise NotImplementedError
+    try:
+        from tensorrt_llm._torch.modules.attention import Attention  # noqa: WPS433
+    except ImportError as exc:  # pragma: no cover -- exercised on Mac dev hosts
+        raise ImportError(
+            "MoonViTAttention requires tensorrt_llm._torch.modules.attention.Attention; "
+            "install tensorrt-llm in the container or run with the PT-only parity test "
+            "harness (tests/test_moonvit_parity.py) that uses MoonViTAttention.apply_rope "
+            "as a standalone method."
+        ) from exc
+    return Attention
 
-    def forward(self, hidden_states, attention_mask=None):
-        raise NotImplementedError
+
+def _moonvit_apply_rope(self, q, k, v, position_ids):
+    """Standalone apply_rope override — designed so it can be bound to either
+    the TRT-LLM Attention base OR a plain nn.Module for parity testing.
+
+    Contract (per Read phase findings):
+    - q,k,v arrive fused-or-split per self.support_fused_qkv; we route through
+      self.split_qkv() which is a last-dim split only (no reshape/transpose).
+    - For VANILLA backend (vision tower) support_fused_qkv=False -> split form.
+    - Shapes post-split: q -> (num_tokens, num_heads * head_dim);
+                         k,v -> (num_tokens, num_kv_heads * head_dim).
+      For SigLIP MHA num_kv_heads == num_heads.
+    - We reshape to (num_tokens, H, D_head) so apply_rope_real's canonical
+      (L, H, D_head) layout from patches.py applies directly (matches MoonViT).
+    - freqs buffers are stored as packed (L_pre, D_head/2, 2) fp32 so the
+      existing patches.apply_rope_real signature works unchanged (no 4-arg
+      variant required, no second function path to maintain).
+    - Output is re-fused via self.convert_qkv per the TRT-LLM hook contract.
+    """
+    # split_qkv: pass-through if already split, else last-dim split.
+    q, k, v = self.split_qkv(q, k, v)
+
+    # FAIL LOUD: q must be 2D (num_tokens, H * D_head); anything else means the
+    # caller dispatched a non-VANILLA-shape tensor and we'd silently corrupt it.
+    if q.ndim != 2:
+        raise RuntimeError(
+            f"MoonViTAttention.apply_rope expected q of shape (num_tokens, H*D_head); "
+            f"got ndim={q.ndim}, shape={tuple(q.shape)}. Did the backend swap to "
+            f"a non-VANILLA kernel that pre-reshapes q?"
+        )
+    num_tokens, qhd = q.shape
+    H = int(self.num_heads)
+    D_head = int(self.head_dim)
+    if qhd != H * D_head:
+        raise RuntimeError(
+            f"q inner dim {qhd} != num_heads({H}) * head_dim({D_head}) = {H * D_head}"
+        )
+    if k.shape[-1] != H * D_head or v.shape[-1] != H * D_head:
+        raise RuntimeError(
+            f"MoonViTAttention assumes MHA (num_kv_heads == num_heads); "
+            f"got k.shape={tuple(k.shape)}, v.shape={tuple(v.shape)}"
+        )
+
+    # Reshape to (L, H, D_head) — canonical MoonViT layout that patches.apply_rope_real
+    # was written against (freqs unsqueeze(-2) broadcasts over the H axis).
+    q = q.reshape(num_tokens, H, D_head)
+    k = k.reshape(num_tokens, H, D_head)
+
+    # Validate freqs registration covers this many tokens.
+    fc_buf = self.freqs_cos
+    fs_buf = self.freqs_sin
+    if fc_buf.shape[0] != num_tokens:
+        raise RuntimeError(
+            f"freqs_cos length {fc_buf.shape[0]} != num_tokens {num_tokens}; "
+            f"MoonViT MVP bakes a static grid (grid_h={self.grid_h}, grid_w={self.grid_w}). "
+            f"Dynamic-grid attention is a separate port site."
+        )
+    if fc_buf.shape[-1] != D_head // 2:
+        raise RuntimeError(
+            f"freqs_cos last dim {fc_buf.shape[-1]} != D_head//2 {D_head // 2}"
+        )
+
+    # Cast cos/sin to q's dtype (bf16 in production) so the multiply inside
+    # apply_rope_real doesn't silently upcast and the post-rotation tensor
+    # concats cleanly with the unrotated v through convert_qkv.
+    fc = fc_buf.to(q.dtype)
+    fs = fs_buf.to(q.dtype)
+
+    # Pack to (L, D_head/2, 2) so we can call patches.apply_rope_real unchanged.
+    # Use SAME function as patches.py to guarantee bitwise parity with the
+    # PT-eager export path (single source of rotation truth).
+    freqs_packed = torch.stack([fc, fs], dim=-1)
+
+    from lrai_locate_anything.patches import apply_rope_real as _patches_apply_rope_real
+    q, k = _patches_apply_rope_real(q, k, freqs_packed)
+
+    # Collapse (L, H, D_head) -> (L, H*D_head) so convert_qkv sees the
+    # canonical last-dim packed layout.
+    q = q.reshape(num_tokens, H * D_head)
+    k = k.reshape(num_tokens, H * D_head)
+
+    return self.convert_qkv(q, k, v)
+
+
+class MoonViTAttention:
+    """SigLIP-style attention with MoonViT's 2D real-RoPE injected via apply_rope.
+
+    Site 3 + Site 4 of Phase D port. Subclass design:
+    - Inherit from tensorrt_llm._torch.modules.attention.Attention (resolved lazily)
+    - Override apply_rope(q, k, v, position_ids) -> (q, k, v) to inject 2D RoPE
+    - Register freqs_cos/freqs_sin as buffers per layer
+    - Force ModelConfig.attn_backend = 'VANILLA' (no kernel re-rotation)
+
+    NO-FALLBACK discipline:
+    - raises if freqs buffer shape/dtype unexpected
+    - raises if VANILLA backend not selected (silent TRTLLM dispatch would corrupt output)
+    - raises if input q/k shape doesn't match registered buffer dims
+
+    Lazy import: the TRT-LLM Attention base is resolved at __init__ time, NOT at
+    module import time. This file remains importable on Mac (no tensorrt_llm)
+    so tests/test_moonvit_parity.py can introspect MoonViTAttention.apply_rope
+    directly via the module-level _moonvit_apply_rope helper.
+    """
+
+    # Sentinel: when constructed, we dynamically subclass the TRT-LLM Attention
+    # base and return an instance of THAT subclass. apply_rope binds to the
+    # standalone _moonvit_apply_rope so parity tests can call it without the
+    # TRT-LLM base in the MRO.
+    apply_rope = _moonvit_apply_rope
+
+    def __new__(
+        cls,
+        *,
+        model_config,
+        layer_idx: int,
+        head_dim: int,
+        num_heads: int,
+        grid_h: int,
+        grid_w: int,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+        **attention_kwargs,
+    ):
+        # FAIL LOUD: VANILLA backend is mandatory. If the model builder dispatched
+        # a fused kernel (TRTLLM, FLASHINFER, ...) our apply_rope override would
+        # be ignored and the output would be silently wrong (Appendix B residual
+        # risk #3). DO NOT silently overwrite — the caller must set it explicitly.
+        attn_backend = getattr(model_config, "attn_backend", None)
+        if attn_backend != "VANILLA":
+            raise RuntimeError(
+                f"MoonViTAttention requires ModelConfig.attn_backend == 'VANILLA'; "
+                f"got {attn_backend!r}. Set it explicitly in the vision-tower model "
+                f"builder — silent override would mask kernel-vs-eager divergence."
+            )
+
+        # FAIL LOUD on freqs shape/dtype before we incur the cost of building the base.
+        expected_shape = (grid_h * grid_w, head_dim // 2)
+        if tuple(freqs_cos.shape) != expected_shape:
+            raise RuntimeError(
+                f"freqs_cos shape {tuple(freqs_cos.shape)} != expected "
+                f"(grid_h*grid_w, head_dim//2) = {expected_shape}"
+            )
+        if tuple(freqs_sin.shape) != expected_shape:
+            raise RuntimeError(
+                f"freqs_sin shape {tuple(freqs_sin.shape)} != expected {expected_shape}"
+            )
+        if freqs_cos.dtype != torch.float32 or freqs_sin.dtype != torch.float32:
+            raise RuntimeError(
+                f"freqs buffers must be fp32 for numerical stability "
+                f"(MoonViT stores cos/sin as fp32 and casts per-call to q.dtype); "
+                f"got freqs_cos.dtype={freqs_cos.dtype}, freqs_sin.dtype={freqs_sin.dtype}"
+            )
+
+        AttentionBase = _resolve_trtllm_attention_base()
+
+        # FAIL LOUD: if someone monkey-patched the import to return torch.nn.Module
+        # we'd silently lose split_qkv / convert_qkv / num_heads / head_dim, producing
+        # garbage at runtime. Sanity-check the base exposes the TRT-LLM contract.
+        for required in ("split_qkv", "convert_qkv"):
+            if not hasattr(AttentionBase, required):
+                raise RuntimeError(
+                    f"Resolved attention base {AttentionBase!r} is missing required "
+                    f"method {required!r}; expected tensorrt_llm._torch.modules."
+                    f"attention.Attention. Refusing to silently fall back to nn.Module."
+                )
+
+        # Dynamically build the concrete subclass that mixes our apply_rope
+        # override into TRT-LLM's Attention. We do this here (rather than at
+        # module-import time) so the base class import stays lazy.
+        concrete_cls = type(
+            "MoonViTAttention_TRTLLM",
+            (AttentionBase,),
+            {"apply_rope": _moonvit_apply_rope},
+        )
+
+        # Build the underlying TRT-LLM Attention; layer_idx / model_config are
+        # the canonical TRT-LLM init args plus any extras the caller passes.
+        instance = AttentionBase.__new__(concrete_cls)
+        AttentionBase.__init__(
+            instance,
+            model_config=model_config,
+            layer_idx=layer_idx,
+            **attention_kwargs,
+        )
+
+        # FAIL LOUD: the TRT-LLM base must have surfaced num_heads / head_dim
+        # matching what we sized the freqs against. Mismatch -> wrong rotation.
+        base_num_heads = getattr(instance, "num_heads", None)
+        base_head_dim = getattr(instance, "head_dim", None)
+        if base_num_heads is None or base_head_dim is None:
+            raise RuntimeError(
+                "TRT-LLM Attention base did not expose num_heads / head_dim; "
+                "MoonViTAttention cannot validate freqs sizing."
+            )
+        if int(base_num_heads) != int(num_heads):
+            raise RuntimeError(
+                f"num_heads mismatch: caller={num_heads} vs base={base_num_heads}"
+            )
+        if int(base_head_dim) != int(head_dim):
+            raise RuntimeError(
+                f"head_dim mismatch: caller={head_dim} vs base={base_head_dim}"
+            )
+
+        # Register freqs as non-persistent fp32 buffers (~6.4 MB; shared across
+        # 27 layers via the caller passing the same tensors — buffer dedup is
+        # the caller's responsibility, see Site 4 in build.py).
+        instance.register_buffer("freqs_cos", freqs_cos.contiguous(), persistent=False)
+        instance.register_buffer("freqs_sin", freqs_sin.contiguous(), persistent=False)
+        instance.grid_h = int(grid_h)
+        instance.grid_w = int(grid_w)
+        return instance
 
 
 class MoonViTEncoderLayer(nn.Module):
