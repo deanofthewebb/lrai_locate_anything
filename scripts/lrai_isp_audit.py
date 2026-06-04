@@ -398,11 +398,22 @@ def main() -> int:
         # Fail loud if the runner module is missing (e.g. trtllm venv not active).
         from lrai_locate_anything.trtllm_prod.runner import LocateAnythingTRTLLMRunner
         engine_dir = Path(args.engine_dir)
-        llm_engine_path = engine_dir / "llm.engine"
-        if not llm_engine_path.exists():
-            # ModelRunner.from_dir accepts the directory directly; fall back to
-            # passing the engine_dir itself so the runner can resolve rank0.engine.
+        # Resolve LLM engine dir: support either layout
+        #   (a) <engine_dir>/llm.engine        (single-file layout, older builds)
+        #   (b) <engine_dir>/llm.bf16/         (subdir layout, current TRT-LLM trtllm-build output)
+        #   (c) <engine_dir>/                  (the engine itself, fallback)
+        if (engine_dir / "llm.engine").exists():
+            llm_engine_path = engine_dir / "llm.engine"
+        elif (engine_dir / "llm.bf16" / "config.json").exists():
+            llm_engine_path = engine_dir / "llm.bf16"
+        elif (engine_dir / "config.json").exists():
             llm_engine_path = engine_dir
+        else:
+            raise FileNotFoundError(
+                f"No TRT-LLM engine found under {engine_dir}. "
+                f"Expected one of: {engine_dir}/llm.engine, "
+                f"{engine_dir}/llm.bf16/config.json, or {engine_dir}/config.json"
+            )
         # Default to PT vision mode — vision_encoder.engine only required for
         # TRT vision mode. vision_mode='pt' keeps the MoonViT+projector vision
         # tower on the PT path (HF weights from weights_dir) while the LLM runs
