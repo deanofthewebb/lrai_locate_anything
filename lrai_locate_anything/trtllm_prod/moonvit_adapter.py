@@ -135,7 +135,7 @@ class MoonViTAdapter:
         }
 
         self.vision_model = MoonViTVisionModel.from_moonvit_state_dict(
-            vision_sd, grid_h=grid_h, grid_w=grid_w, use_bf16=False
+            vision_sd, grid_h=grid_h, grid_w=grid_w, use_bf16=True
         )
 
         # Harvest freqs_source from HF Rope2DPosEmb (one-time)
@@ -157,7 +157,8 @@ class MoonViTAdapter:
         self.vision_model.install_pt_attention_swap(
             freqs_packed=init_packed, freqs_source=freqs_source
         )
-        del hf_full, hf_vision  # free RAM
+        del hf_full, hf_vision  # free RAM (CPU); flush CUDA allocator too
+        torch.cuda.empty_cache()
 
         self.vision_model = self.vision_model.cuda().eval()
         # PT mode does no letterboxing inside the adapter; the processor does
