@@ -298,6 +298,84 @@ out = self.o_proj(attn_out)
 
 ---
 
+## Appendix B — RoPE Injection Research (research workflow wrfp679ez, 2026-06-03)
+
+### Decision: Path (b) — override Attention.apply_rope
+
+Research read /usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/modules/attention.py
++ rotary_embedding.py + interface.py inside the v1.0.0 container. Findings:
+
+#### apply_rope hook EXISTS and is documented for this use case
+
+```python
+# attention.py:494-513
+def apply_rope(self, q, k, v, position_ids):
+    """This method could be overridden in the subclass, in which extra
+    functionalities such as q_norm/k_norm could be added."""
+    q, k, v = self.split_qkv(q, k, v)
+    if not self.rope_fusion:
+        self.rotary_emb(position_ids, [q, k])
+    return self.convert_qkv(q, k, v)
+```
+
+This is the documented subclass override point. Signature gives us individually-addressable q, k, v — the ONLY Python window where they're separate (qkv_proj outputs a fused tensor, kernels see fused QKV again post-convert_qkv).
+
+#### pos_embd_params does NOT support 2D real-RoPE
+
+`PositionalEmbeddingParams` (interface.py:495-511) is a frozen dataclass wrapping
+`RopeParams` which takes scalar config only: dim, theta, scale_type, max_positions.
+NO `freqs_cos`/`freqs_sin` field. NO inv_freq override. Supported variants are all 1D
+or M-RoPE (multimodal 1D w/ position deltas). Path (c) ruled out without invasive
+framework surgery.
+
+#### VANILLA backend is mandatory for vision
+
+The default TRTLLM backend has `support_fused_rope=True` (trtllm.py:1269), meaning
+the kernel re-applies RoPE internally from pos_embd_params even if apply_rope already
+rotated. To avoid double-rotation, we MUST set
+`ModelConfig.attn_backend = "VANILLA"` on the vision tower. VANILLA's
+`support_fused_rope=False` causes the framework to auto-disable rope_fusion and use
+our apply_rope output directly.
+
+Perf cost of VANILLA on vision: minimal (no KV cache, no in-flight batching, fixed
+seq_len = 1656). The savings TRTLLM offers (paged FMHA, NVFP4 output) are
+LM-decode-loop optimizations that don't apply to a single-shot vision forward.
+
+#### 5 residual risks (validate empirically in implementation)
+
+1. `convert_qkv` re-concat layout (interleaved vs split-by-head) — shape/stride assertion on first forward.
+2. VANILLA's `no_kv_cache_forward` uses `flash_attn_varlen_func` which needs `cu_seqlens`
+   for variable patch counts under dynamic grid — may need a vision-specific
+   AttentionMetadata factory.
+3. apply_rope is invoked unconditionally — if MoonViT has registers-only blocks
+   that skip RoPE, need a per-layer bypass flag.
+4. bf16 autocast around RoPE cos/sin multiply — cast cos/sin to match q/k dtype
+   or silent fp32 upcast breaks downstream fused kernels.
+5. Parity drift if HF MoonViT applies RoPE at a different point than our hook.
+
+### Revised Phase D estimate: 13 days (was 12)
+
++1 day for VANILLA backend dispatch verification + bf16-RoPE numerical stability work.
+
+### NO-FALLBACK DISCIPLINE (per user directive 2026-06-03)
+
+Per project memory `feedback_no_fallbacks_or_gates`:
+
+- **NO try/except** around weight loading. Missing/mis-shaped weights MUST raise.
+- **NO random-init fallbacks** anywhere — see `project_locateanything_lm_head_root_cause`
+  (vendor skipped post_init → random lm_head → mode collapse). Every weight load
+  MUST assert trained signature (e.g. std > 0.015 for layer norms, sha256 match
+  for re-loadable buffers).
+- **NO silent shape coercion** — if shapes mismatch, raise with the actual shape.
+- **NO "if backend X unavailable, use Y"** patterns. If VANILLA backend isn't
+  selectable for some reason, raise — don't quietly downgrade to a path that
+  produces different outputs.
+
+Implementation will use explicit `assert` and `raise RuntimeError` with
+descriptive messages at every weight-load and shape-validation boundary.
+
+---
+
 ## 7. Risks
 
 1. **TRT-LLM SigLIP plugin signature**: the stock plugin may require `(B, N, D)` token shape and a static `num_positions` derived from `image_size // patch_size`. Our `(L_pre, D)` no-batch contract may force a wrapper that unsqueezes/squeezes around the plugin call, OR a re-export of the plugin with a custom token-count axis.
