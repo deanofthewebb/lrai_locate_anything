@@ -206,7 +206,7 @@ class LocateAnythingTRTLLMRunner:
 
         # 4. Load tokenizer + HF config (for image_token_index, eos_token_id,
         # special-token ids consumed by parse_boxes_with_labels).
-        from transformers import AutoTokenizer, AutoProcessor
+        from transformers import AutoTokenizer
         if not (hf_dir / "tokenizer_config.json").exists():
             raise FileNotFoundError(
                 f"tokenizer_config.json not found in {hf_dir}. "
@@ -217,11 +217,17 @@ class LocateAnythingTRTLLMRunner:
         )
         # PT-mode vision adapter needs the HF AutoProcessor (handles
         # letterbox + normalization + grid_hws emission internally). TRT-mode
-        # does letterbox inside MoonViTAdapter._letterbox; processor is unused
-        # there but cheap to construct, so we always load it.
-        self.processor = AutoProcessor.from_pretrained(
-            str(hf_dir), trust_remote_code=True
-        )
+        # does letterbox inside MoonViTAdapter._letterbox; the processor is NOT
+        # loaded for TRT mode because the vendor's AutoProcessor dynamic module
+        # imports decord + lmdb at load time — packages absent in the TRT-LLM
+        # container image (nvcr.io/nvidia/tensorrt-llm/release:latest).
+        if vision_mode == "pt":
+            from transformers import AutoProcessor
+            self.processor = AutoProcessor.from_pretrained(
+                str(hf_dir), trust_remote_code=True
+            )
+        else:
+            self.processor = None
         hf_cfg_path = hf_dir / "config.json"
         if not hf_cfg_path.exists():
             raise FileNotFoundError(f"HF config.json not found at {hf_cfg_path}")
