@@ -273,13 +273,16 @@ class MoonViTAdapter:
                 )
             processor = self._processor
 
-        # The processor __call__ requires a non-None text argument; line 480 of
-        # processing_locateanything.py does `text[0]` unconditionally when text
-        # is not a str, which crashes when text=None.  Pass the standard
-        # single-image placeholder so the processor substitutes it with the
-        # visual token sequence and also returns image_grid_hws.
+        # The processor __call__ requires (a) a non-None text argument — line 480
+        # of processing_locateanything.py does `text[0]` unconditionally when
+        # text is not a str, crashing when text=None; and (b) images as a list
+        # — the replace_media_placeholder loop slices images[start:] expecting
+        # a sequence, so a bare PIL Image raises 'Image object is not
+        # subscriptable'.  Pass the standard single-image placeholder and wrap
+        # the image in a list.
         image_placeholder_text = getattr(processor, "image_placeholder", "image")
-        inputs = processor(images=image_pil, text=f"<{image_placeholder_text}-1>", return_tensors="pt")
+        images_arg = image_pil if isinstance(image_pil, list) else [image_pil]
+        inputs = processor(images=images_arg, text=f"<{image_placeholder_text}-1>", return_tensors="pt")
         pixel_values = inputs["pixel_values"].cuda()
         grid_hws = inputs.get("image_grid_hws", None)
         if grid_hws is None:
