@@ -215,15 +215,17 @@ class LocateAnythingTRTLLMRunner:
         self.tokenizer = AutoTokenizer.from_pretrained(
             str(hf_dir), trust_remote_code=True
         )
-        # PT-mode vision adapter needs the HF AutoProcessor (handles
-        # letterbox + normalization + grid_hws emission internally). TRT-mode
-        # does letterbox inside MoonViTAdapter._letterbox; the processor is NOT
-        # loaded for TRT mode because the vendor's AutoProcessor dynamic module
-        # imports decord + lmdb at load time — packages absent in the TRT-LLM
-        # container image (nvcr.io/nvidia/tensorrt-llm/release:latest).
+        # PT-mode vision adapter needs the HF AutoImageProcessor (image-only
+        # path — handles letterbox + normalization + grid_hws emission). Using
+        # AutoImageProcessor (NOT AutoProcessor) because the vendor's multimodal
+        # __call__ at processing_locateanything.py:480 subscripts text[0] even
+        # when text=None — crashing image-only calls. AutoImageProcessor uses
+        # the image_processor path defined in vendor's auto_map and skips text
+        # handling entirely. TRT-mode does letterbox inside MoonViTAdapter
+        # ._letterbox; the processor is NOT loaded there.
         if vision_mode == "pt":
-            from transformers import AutoProcessor
-            self.processor = AutoProcessor.from_pretrained(
+            from transformers import AutoImageProcessor
+            self.processor = AutoImageProcessor.from_pretrained(
                 str(hf_dir), trust_remote_code=True
             )
         else:
