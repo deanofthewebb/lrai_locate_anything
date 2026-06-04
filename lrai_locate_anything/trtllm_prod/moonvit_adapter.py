@@ -295,8 +295,7 @@ class MoonViTAdapter:
             images_arg = [_img]
         else:
             images_arg = image_pil
-        image_placeholder_text = getattr(processor, "image_placeholder", "image")
-        inputs = processor(images=images_arg, text=f"<{image_placeholder_text}-1>", return_tensors="pt")
+        inputs = processor(images=images_arg, return_tensors="pt")
         pixel_values = inputs["pixel_values"].cuda()
         grid_hws = inputs.get("image_grid_hws", None)
         if grid_hws is None:
