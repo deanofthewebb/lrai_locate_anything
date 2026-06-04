@@ -171,9 +171,35 @@ class LocateAnythingTRTLLMRunner:
         # 3. Load the LLM TRT runtime. This is the no-fallback fail-loud path:
         # if cu13 / cudnn / nccl LD_LIBRARY_PATH isn't set we let ImportError
         # propagate. See trtllm_prod/convert.py docstring.
+        #
+        # Compatibility shim: trtllm-build 1.2.x writes 'auto_parallel' into
+        # pretrained_config.mapping but tensorrt_llm 1.2.1 Mapping.__init__
+        # does not accept that field → TypeError at Engine.from_dir time.
+        # Strip it before loading if present. We write to a temp dir with
+        # symlinks to the actual engine shards so the engine files stay intact.
+        import copy, tempfile
         from tensorrt_llm.runtime import ModelRunner
+        _load_engine_dir = str(engine_dir)
+        _mapping_cfg = engine_cfg.get("pretrained_config", {}).get("mapping", {})
+        _mapping_fields_to_strip = {"auto_parallel"}
+        _unknown_mapping_keys = _mapping_fields_to_strip & set(_mapping_cfg.keys())
+        if _unknown_mapping_keys:
+            _patched_cfg = copy.deepcopy(engine_cfg)
+            for _k in _unknown_mapping_keys:
+                _patched_cfg["pretrained_config"]["mapping"].pop(_k, None)
+            _tmp_dir = tempfile.mkdtemp(prefix="locany_engine_")
+            import os as _os
+            _tmp_path = Path(_tmp_dir)
+            # Symlink rank0.engine (and any other .engine / .safetensors files)
+            for _f in engine_dir.iterdir():
+                if _f.name != "config.json":
+                    (_tmp_path / _f.name).symlink_to(_f.resolve())
+            (_tmp_path / "config.json").write_text(
+                json.dumps(_patched_cfg, indent=4)
+            )
+            _load_engine_dir = _tmp_dir
         self.llm_runner = ModelRunner.from_dir(
-            engine_dir=str(engine_dir),
+            engine_dir=_load_engine_dir,
             rank=0,
             debug_mode=False,
         )
