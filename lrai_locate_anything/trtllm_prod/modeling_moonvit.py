@@ -866,6 +866,10 @@ class MoonViTVisionModel(nn.Module):
             for attn, (fc, fs) in zip(attns, cached_freqs):
                 attn.register_buffer("freqs_cos", fc.to(attn.freqs_cos.device), persistent=False)
                 attn.register_buffer("freqs_sin", fs.to(attn.freqs_sin.device), persistent=False)
+                # If attn is a _PTBlockFreqsProxy, the parent block consumes
+                # freqs_packed (not freqs_cos/freqs_sin), so we must re-pack.
+                if hasattr(attn, "_sync_packed_from_cos_sin"):
+                    attn._sync_packed_from_cos_sin()
                 attn.grid_h = new_grid_h
                 attn.grid_w = new_grid_w
             self._update_merger_grid(new_grid_h, new_grid_w)
@@ -1254,14 +1258,28 @@ class MoonViTVisionModel(nn.Module):
 # dedup contract as the TRT-LLM path).
 # ----------------------------------------------------------------------
 class _PTBlockFreqsProxy(nn.Module):
-    """Thin handle that exposes reslice_freqs so MoonViTVisionModel._iter_attentions
-    can re-rope this block on set_grid(). Mutates the parent block's freqs_packed in place."""
+    """Thin handle exposing the vendor MoonViTAttention freqs interface
+    (freqs_cos, freqs_sin, reslice_freqs) on top of _MoonViTPTAttentionBlock,
+    which stores freqs as a single packed buffer self.freqs_packed of layout
+    (L, D_head/2, 2) where the last dim packs (cos, sin).
+
+    reslice_freqs updates all three: self.freqs_cos, self.freqs_sin, and
+    self._parent.freqs_packed (which is what the block's attention forward consumes).
+    """
     def __init__(self, parent, freqs_source):
         super().__init__()
         self._parent = parent
-        # store the un-sliced full freqs source as a non-persistent buffer
-        # Expected layout: (H_max, W_max, D_head/2, 2) — last dim packs (cos, sin).
+        # Full source table: (H_max, W_max, D_head/2, 2), last dim packs (cos, sin).
         self.register_buffer("freqs_source", freqs_source, persistent=False)
+        # Current slice exposed as vendor-compatible cos/sin buffers.
+        # Initial values must match parent.freqs_packed at install time.
+        fp = parent.freqs_packed  # (L_init, D_head/2, 2)
+        if fp.ndim != 3 or fp.shape[-1] != 2:
+            raise RuntimeError(
+                f"_PTBlockFreqsProxy: parent.freqs_packed shape {tuple(fp.shape)} not (L, D/2, 2)"
+            )
+        self.register_buffer("freqs_cos", fp[..., 0].contiguous(), persistent=False)
+        self.register_buffer("freqs_sin", fp[..., 1].contiguous(), persistent=False)
 
     def reslice_freqs(self, new_grid_h, new_grid_w):
         new_grid_h = int(new_grid_h)
@@ -1275,15 +1293,43 @@ class _PTBlockFreqsProxy(nn.Module):
             raise RuntimeError(
                 f"reslice_freqs: grid ({new_grid_h},{new_grid_w}) exceeds source ({H_max},{W_max})"
             )
-        sliced = self.freqs_source[:new_grid_h, :new_grid_w].reshape(
-            new_grid_h * new_grid_w, -1, 2
-        )
-        # Update parent's freqs_packed in place (re-register so shape changes take effect).
-        dev = self._parent.freqs_packed.device
-        dtype = self._parent.freqs_packed.dtype
+        D_half = self.freqs_source.shape[2]
+        sliced = self.freqs_source[:new_grid_h, :new_grid_w]  # (h, w, D/2, 2)
+        sliced_flat = sliced.reshape(new_grid_h * new_grid_w, D_half, 2).contiguous()
+        # Update parent block's packed buffer (what attention forward consumes).
+        parent_dtype = self._parent.freqs_packed.dtype
+        parent_dev = self._parent.freqs_packed.device
         self._parent.register_buffer(
             "freqs_packed",
-            sliced.to(device=dev, dtype=dtype).contiguous(),
+            sliced_flat.to(device=parent_dev, dtype=parent_dtype).contiguous(),
+            persistent=False,
+        )
+        # Update vendor-compatible buffers (what set_grid's cache reads).
+        self.register_buffer(
+            "freqs_cos",
+            sliced_flat[..., 0].to(device=parent_dev, dtype=parent_dtype).contiguous(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "freqs_sin",
+            sliced_flat[..., 1].to(device=parent_dev, dtype=parent_dtype).contiguous(),
+            persistent=False,
+        )
+
+    def _sync_packed_from_cos_sin(self):
+        """Call after externally swapping freqs_cos/freqs_sin (e.g. cache restore
+        in set_grid) to ensure parent.freqs_packed is in sync."""
+        if self.freqs_cos.shape != self.freqs_sin.shape:
+            raise RuntimeError(
+                f"_sync_packed: cos/sin shape mismatch "
+                f"{tuple(self.freqs_cos.shape)} vs {tuple(self.freqs_sin.shape)}"
+            )
+        packed = torch.stack([self.freqs_cos, self.freqs_sin], dim=-1).contiguous()
+        parent_dtype = self._parent.freqs_packed.dtype
+        parent_dev = self._parent.freqs_packed.device
+        self._parent.register_buffer(
+            "freqs_packed",
+            packed.to(device=parent_dev, dtype=parent_dtype).contiguous(),
             persistent=False,
         )
 

@@ -34,17 +34,31 @@ def _load_vision_sd():
 @pytest.fixture(scope="module")
 def setup():
     from transformers import AutoModel
-    from lrai_locate_anything.trtllm_prod.modeling_moonvit import MoonViTVisionModel
+    from lrai_locate_anything.trtllm_prod.modeling_moonvit import (
+        MoonViTVisionModel,
+        build_freqs_packed_for,
+    )
     torch.manual_seed(42)
     vision_sd = _load_vision_sd()
+    init_h, init_w = 36, 46
     model = MoonViTVisionModel.from_moonvit_state_dict(
-        vision_sd, grid_h=36, grid_w=46, use_bf16=False
+        vision_sd, grid_h=init_h, grid_w=init_w, use_bf16=False
     ).eval()
     hf_full = AutoModel.from_pretrained(WEIGHTS, trust_remote_code=True, torch_dtype=torch.float32).eval()
     hf_vision = hf_full.vision_model
+    # Rope2DPosEmb defers precompute until first get_freqs_cis(). Trigger it so
+    # rope_2d.freqs_cis is materialized (complex (max_h, max_w, D_head/2)).
+    hf_vision.encoder.rope_2d.get_freqs_cis(
+        torch.tensor([[init_h, init_w]], dtype=torch.long)
+    )
     freqs_cis = hf_vision.encoder.rope_2d.freqs_cis
+    assert freqs_cis is not None, "rope_2d.freqs_cis was not materialized by get_freqs_cis()"
     freqs_source = torch.stack([freqs_cis.real, freqs_cis.imag], dim=-1).to(torch.float32)
-    model.install_pt_attention_swap(freqs_source=freqs_source)
+    # Production signature: install_pt_attention_swap(freqs_packed, freqs_source=None).
+    # Build the initial-grid freqs_packed from the HF table so each PT block has
+    # a buffer matching the (init_h * init_w) sequence length used pre-set_grid().
+    freqs_packed = build_freqs_packed_for(freqs_cis, init_h, init_w)
+    model.install_pt_attention_swap(freqs_packed, freqs_source=freqs_source)
     return model, hf_vision, hf_full
 
 
