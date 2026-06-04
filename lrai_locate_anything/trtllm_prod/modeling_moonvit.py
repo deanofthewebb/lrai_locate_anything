@@ -1,15 +1,16 @@
 """MoonViT-as-SigLIP-fork — vision encoder for the TRT-LLM production path.
 
-PHASE D SCAFFOLD ONLY. All methods raise NotImplementedError pending
-the full 12-day port (see docs/phase_d_moonvit_port_delta.md).
+Sites 1-7 ported; Site 8 (weight loader) is the remaining TODO. See
+docs/phase_d_moonvit_port_delta.md for the full 12-day port plan.
 
 Class hierarchy:
-- MoonViTVisionEmbeddings: patch_embed (Conv2d) + pos_emb_baked + Rope2DReal buffers
-- MoonViTAttention: 2D-RoPE-aware attention (apply_rope_real before sdpa)
-- MoonViTEncoderLayer: pre-norm + attention + MLP (same as SigLIP)
-- MoonViTEncoder: stack of n_layers=27 encoder layers
-- MoonViTProjector: LayerNorm + Linear + GELU + Linear (mlp1 from our export/projector.py)
-- MoonViTVisionModel: top-level wrapper feeding into a TRT-LLM ModelConfig
+- MoonViTVisionEmbeddings (Site 1+2): patch_embed (Conv2d) + pos_emb_baked
+- MoonViTAttention (Site 3+4): 2D-RoPE-aware attention; wraps TRT-LLM Attention base
+- MoonViTVisionTransformer (Site 5): SiglipVisionEncoder wrapper; post_layernorm = Identity
+- MoonViTPatchMerger (Site 6.a): 2x2 pixel-shuffle reshape; bit-equal StaticPatchMerger
+- MoonViTProjector (Site 6.b): LayerNorm + Linear + GELU + Linear (mlp1 graft)
+- MoonViTVisionModel (Site 7): top-level wrapper with bf16 autocast at the boundary
+- load_moonvit_weights (Site 8, TODO): checkpoint -> MoonViTVisionModel loader
 """
 from __future__ import annotations
 import os
@@ -349,63 +350,243 @@ class MoonViTAttention:
         return instance
 
 
-class MoonViTEncoderLayer(nn.Module):
-    """Same as SiglipEncoderLayer (pre-norm + attn + MLP). No change needed."""
-    def __init__(self, config):
-        super().__init__()
-        raise NotImplementedError
+class MoonViTPatchMerger(nn.Module):
+    """Site 6 (part 1): 2x2 pixel-shuffle reshape.
 
+    Bit-equal to lrai_locate_anything/export_prod/vision_proj.py:StaticPatchMerger.
 
-class MoonViTEncoder(nn.Module):
-    """Stack of n_layers=27 encoder blocks."""
-    def __init__(self, config):
+    Input:  (L_pre, hidden_size) where L_pre = grid_h * grid_w
+    Output: (L_post, hidden_size * kh * kw) where L_post = (grid_h/kh) * (grid_w/kw)
+
+    NO-FALLBACK discipline:
+    - raises if grid not divisible by merge kernel (no implicit padding/truncation)
+    - raises if input L_pre doesn't match baked grid (dynamic merge not supported)
+    """
+    def __init__(self, grid_h: int, grid_w: int, kh: int = 2, kw: int = 2):
         super().__init__()
-        raise NotImplementedError
+        if grid_h % kh != 0 or grid_w % kw != 0:
+            raise RuntimeError(
+                f"grid ({grid_h},{grid_w}) not divisible by merge kernel ({kh},{kw})"
+            )
+        self.grid_h = int(grid_h)
+        self.grid_w = int(grid_w)
+        self.kh = int(kh)
+        self.kw = int(kw)
+        self.nh = self.grid_h // self.kh
+        self.nw = self.grid_w // self.kw
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # FAIL LOUD on input shape
+        if x.ndim != 2:
+            raise RuntimeError(
+                f"MoonViTPatchMerger expects 2D (L_pre, hidden_size); got {x.ndim}D shape={tuple(x.shape)}"
+            )
+        L_pre = self.grid_h * self.grid_w
+        if x.shape[0] != L_pre:
+            raise RuntimeError(
+                f"input L_pre {x.shape[0]} != expected {L_pre} "
+                f"(grid_h={self.grid_h}, grid_w={self.grid_w})"
+            )
+        d = x.shape[-1]
+        # view -> permute -> view: matches export_prod/vision_proj.py:StaticPatchMerger.forward
+        # (L_pre, d) -> (nh, kh, nw, kw, d) -> (nh, nw, kh, kw, d) -> (L_post, kh*kw*d)
+        return (
+            x.view(self.nh, self.kh, self.nw, self.kw, d)
+            .permute(0, 2, 1, 3, 4)
+            .contiguous()
+            .view(self.nh * self.nw, self.kh * self.kw * d)
+        )
 
 
 class MoonViTProjector(nn.Module):
-    """LayerNorm + Linear + GELU + Linear (our mlp1 baked inside vision engine).
+    """Site 6 (part 2): LayerNorm + Linear + GELU + Linear — mlp1 graft from MoonViT.
 
-    TODO Port site 6 (Appendix A.6) / projector half: input (B, L_post=414, kh*kw*D=4608)
-    after StaticPatchMerger; layers LayerNorm(4608) -> Linear(4608, 2048) -> GELU ->
-    Linear(2048, 2048); output (B=1, L_post=414, text_hidden=2048). Copy sub-modules
-    directly from moonvit_model.mlp1 — do NOT reconstruct from config (activation
-    string trap: gelu vs gelu_pytorch_tanh).
+    Mirrors lrai_locate_anything/export_prod/projector.py:ProjectorForExport which
+    treats mlp1 as an opaque module. We materialize the canonical 4-layer composition
+    (Appendix A.6) and load weights from the source mlp1 state_dict.
+
+    Input:  (L_post, hidden * kh * kw) e.g. (414, 4608)
+    Output: (L_post, text_hidden) e.g. (414, 2048)
+
+    NO-FALLBACK discipline:
+    - mlp1_state_dict must contain all 6 expected keys or raises (no zero-init)
+    - shapes are validated against the supplied state_dict tensors
+    - GELU activation is the plain `nn.GELU()` (matches PyTorch default 'none' approx);
+      caller must pre-validate that MoonViT mlp1 was not exported with tanh approx.
     """
-    def __init__(self, vit_hidden=1152, kh=2, kw=2, text_hidden=2048):
+    def __init__(self, in_features: int, text_hidden: int, mlp1_state_dict: dict):
         super().__init__()
-        raise NotImplementedError
+        self.in_features = int(in_features)
+        self.text_hidden = int(text_hidden)
+
+        self.layernorm = nn.LayerNorm(in_features)
+        self.linear1 = nn.Linear(in_features, text_hidden)
+        self.gelu = nn.GELU()
+        self.linear2 = nn.Linear(text_hidden, text_hidden)
+
+        # MoonViT mlp1 is Sequential( [0]=LayerNorm, [1]=Linear, [2]=GELU, [3]=Linear ).
+        # ProjectorForExport copies sub-modules directly, so its state_dict keys carry
+        # the Sequential indices: "0.weight", "0.bias", "1.weight", "1.bias",
+        # "3.weight", "3.bias".
+        required = ["0.weight", "0.bias", "1.weight", "1.bias", "3.weight", "3.bias"]
+        missing = [k for k in required if k not in mlp1_state_dict]
+        if missing:
+            raise RuntimeError(
+                f"mlp1_state_dict missing keys: {missing}. Expected MoonViT mlp1 "
+                f"Sequential(LayerNorm, Linear, GELU, Linear) with keys {required}."
+            )
+
+        ln_w = mlp1_state_dict["0.weight"]
+        ln_b = mlp1_state_dict["0.bias"]
+        l1_w = mlp1_state_dict["1.weight"]
+        l1_b = mlp1_state_dict["1.bias"]
+        l2_w = mlp1_state_dict["3.weight"]
+        l2_b = mlp1_state_dict["3.bias"]
+
+        # FAIL LOUD on shape mismatch — silent broadcast/pad would corrupt logits.
+        if tuple(ln_w.shape) != (in_features,):
+            raise RuntimeError(
+                f"mlp1 layernorm weight shape {tuple(ln_w.shape)} != ({in_features},)"
+            )
+        if tuple(ln_b.shape) != (in_features,):
+            raise RuntimeError(
+                f"mlp1 layernorm bias shape {tuple(ln_b.shape)} != ({in_features},)"
+            )
+        if tuple(l1_w.shape) != (text_hidden, in_features):
+            raise RuntimeError(
+                f"mlp1 linear1 weight shape {tuple(l1_w.shape)} != "
+                f"({text_hidden}, {in_features})"
+            )
+        if tuple(l1_b.shape) != (text_hidden,):
+            raise RuntimeError(
+                f"mlp1 linear1 bias shape {tuple(l1_b.shape)} != ({text_hidden},)"
+            )
+        if tuple(l2_w.shape) != (text_hidden, text_hidden):
+            raise RuntimeError(
+                f"mlp1 linear2 weight shape {tuple(l2_w.shape)} != "
+                f"({text_hidden}, {text_hidden})"
+            )
+        if tuple(l2_b.shape) != (text_hidden,):
+            raise RuntimeError(
+                f"mlp1 linear2 bias shape {tuple(l2_b.shape)} != ({text_hidden},)"
+            )
+
+        # Explicit copy_ — no try/except; if dtype/device mismatch raise.
+        with torch.no_grad():
+            self.layernorm.weight.copy_(ln_w)
+            self.layernorm.bias.copy_(ln_b)
+            self.linear1.weight.copy_(l1_w)
+            self.linear1.bias.copy_(l1_b)
+            self.linear2.weight.copy_(l2_w)
+            self.linear2.bias.copy_(l2_b)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] != self.in_features:
+            raise RuntimeError(
+                f"MoonViTProjector input last-dim {x.shape[-1]} != in_features {self.in_features}"
+            )
+        x = self.layernorm(x)
+        x = self.linear1(x)
+        x = self.gelu(x)
+        x = self.linear2(x)
+        return x
+
+
+class MoonViTVisionTransformer(nn.Module):
+    """Site 5: encoder wrapper — skip post_layernorm; drop (B,N,D) reshape since B=1 implicit.
+
+    Wraps the TRT-LLM SiglipVisionEncoder (the encoder stack of MoonViTEncoderLayer
+    blocks). MoonViT canonical has no trailing LayerNorm so `post_layernorm` is
+    unconditionally `nn.Identity()`. Per Read findings, SiglipVisionTransformer
+    accepts `use_post_layernorm=False` and sets `post_layernorm=nn.Identity()`,
+    so this wrapper is intentionally narrow — it just enforces the 2D (L_pre, D)
+    contract that downstream merger/projector expect.
+
+    NO-FALLBACK discipline:
+    - post_layernorm replacement is unconditional (no "if has post_layernorm" branch)
+    - input must be 2D (L_pre, hidden_size); 3D batched inputs raise
+    """
+    def __init__(self, encoder_module: nn.Module):
+        super().__init__()
+        self.encoder = encoder_module
+        # MoonViT canonical doesn't apply a trailing LN; force Identity.
+        self.post_layernorm = nn.Identity()
+
+    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        # embeddings shape: (L_pre, hidden_size)
+        if embeddings.ndim != 2:
+            raise RuntimeError(
+                f"embeddings must be 2D (L_pre, hidden_size); "
+                f"got {embeddings.ndim}D shape={tuple(embeddings.shape)}"
+            )
+        hidden_states = self.encoder(embeddings)  # TRT-LLM SiglipVisionEncoder stack
+        # Skip post_layernorm — MoonViT canonical doesn't apply one (Identity).
+        return self.post_layernorm(hidden_states)
 
 
 class MoonViTVisionModel(nn.Module):
-    """Top-level: embeddings -> encoder -> patch_merge -> projector. bf16 autocast."""
-    def __init__(self, config):
+    """Site 7: end-to-end wrapper — embeddings -> transformer -> merger -> projector.
+
+    bf16 autocast at the boundary so submodules (Conv2d, Linear, Attention) run
+    in bf16 while register_buffer tensors stay fp32 (pos_emb_baked, freqs_cos/sin)
+    and are cast on consumption inside their owning submodules.
+
+    NO-FALLBACK discipline:
+    - pixel_values must be 4D (L_pre, 3, P, P)
+    - use_bf16 is explicit (default True); caller can override but cannot silently
+      disable autocast via misconfiguration
+    """
+    def __init__(
+        self,
+        embeddings: nn.Module,
+        transformer: nn.Module,
+        merger: nn.Module,
+        projector: nn.Module,
+        *,
+        use_bf16: bool = True,
+    ):
         super().__init__()
-        raise NotImplementedError
+        self.embeddings = embeddings
+        self.transformer = transformer
+        self.merger = merger
+        self.projector = projector
+        self.use_bf16 = bool(use_bf16)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        # FAIL LOUD on input shape
+        if pixel_values.ndim != 4:
+            raise RuntimeError(
+                f"pixel_values must be 4D (L_pre, 3, P, P); "
+                f"got {pixel_values.ndim}D shape={tuple(pixel_values.shape)}"
+            )
+        # Site 7: bf16 autocast wrapper.
+        # Note: register_buffer tensors (pos_emb_baked, freqs_cos/sin) are fp32; they
+        # are cast on consumption inside the submodules (embeddings.forward broadcasts
+        # pos_emb_baked; _moonvit_apply_rope casts freqs_cos/sin to q.dtype).
+        with torch.autocast(
+            device_type=pixel_values.device.type,
+            dtype=torch.bfloat16,
+            enabled=self.use_bf16,
+        ):
+            embeddings = self.embeddings(pixel_values)
+            encoded = self.transformer(embeddings)
+            merged = self.merger(encoded)
+            out = self.projector(merged)
+        return out
 
 
-# Module-level helpers
-def apply_rope_real(q, k, freqs_cos, freqs_sin):
-    """Real-space 2-D RoPE. TODO Port site 3 helper (Appendix A.3): inputs q,k each
-    (B=1, H=16, T=L_pre=1656, D_head=72); freqs_cos/freqs_sin each (1, 1, T, D_head/2=36).
-    Split q along last dim into (q_real, q_imag) — verify half-then-half vs interleaved
-    pairing against MoonViT canonical patches.py. Compute out_r = q_real*cos - q_imag*sin,
-    out_i = q_real*sin + q_imag*cos in fp32; reconcat to (B, H, T, D_head); cast back to
-    q.dtype before return. Same op on k.
+def load_moonvit_weights(model: "MoonViTVisionModel", source_state_dict: dict) -> None:
+    """Site 8 (TODO): weight loader from source MoonViT checkpoint into MoonViTVisionModel.
+
+    TODO Port site 8 (Appendix A.8): translate the source `moonvit_model` state_dict
+    keys (vit.patch_embed.proj.*, vit.blocks.{i}.{norm1,attn,norm2,mlp}.*, mlp1.*) into
+    MoonViTVisionModel submodule paths (embeddings.patch_embedding.*,
+    transformer.encoder.layers.{i}.*, projector.{layernorm,linear1,linear2}.*). The
+    mlp1 sub-state is already wired through MoonViTProjector.__init__; this loader
+    must (a) bake pos_emb_baked from vit.patch_embed.pos_emb.weight via the
+    embeddings constructor, (b) load Q/K/V split (vendor stores fused qkv while
+    TRT-LLM Attention takes split q_proj/k_proj/v_proj), (c) register freqs_cos/
+    freqs_sin computed from grid coords. FAIL LOUD on any missing source key or
+    shape mismatch — no silent zero-init.
     """
-    raise NotImplementedError
-
-
-def interpolate_pos_encoding(pos_emb_baked, grid_h, grid_w):
-    """Dynamic grid support (D-sub-2). TODO Port site 1 helper (Appendix A.1, dynamic path):
-    input pos_emb_baked is the *un-interpolated* (H_max, W_max, D) weight (stored as a
-    non-persistent buffer in the dynamic path). On grid change call
-    F.interpolate(weight.permute(2,0,1).unsqueeze(0), size=(grid_h, grid_w), mode="bicubic",
-    align_corners=False) -> squeeze(0).permute(1,2,0).flatten(end_dim=1) ->
-    (L_pre=grid_h*grid_w, D=1152). MVP bakes (36, 46) at __init__; this fn is for the
-    eager-PT dynamic path only (parity tests, MoonViTAdapter fallback) — TRT engines are
-    static and built one-per-bucket."""
-    raise NotImplementedError
+    raise NotImplementedError("Site 8 weight loader not yet ported")
