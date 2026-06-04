@@ -13,6 +13,7 @@ Class hierarchy:
 - load_moonvit_weights (Site 8, TODO): checkpoint -> MoonViTVisionModel loader
 """
 from __future__ import annotations
+import math
 import os
 from typing import Optional
 import torch
@@ -803,6 +804,14 @@ class MoonViTVisionModel(nn.Module):
                     attn = cand
                     break
             if attn is None:
+                # PT swap path: _MoonViTPTAttentionBlock stores its rope table as
+                # block.freqs_packed and exposes reslice via block.attention (a
+                # _PTBlockFreqsProxy). It has no freqs_cos/freqs_sin, so the loop
+                # above won't catch it — handle it explicitly here.
+                proxy = getattr(block, "attention", None)
+                if proxy is not None and hasattr(proxy, "reslice_freqs"):
+                    yield proxy
+                    continue
                 # Pre-swap skeleton block (wqkv/wo only). Skip silently here —
                 # set_grid is a no-op on the structural placeholder used on
                 # Mac PT-only tests. A FAIL LOUD here would break those tests.
@@ -859,6 +868,7 @@ class MoonViTVisionModel(nn.Module):
                 attn.register_buffer("freqs_sin", fs.to(attn.freqs_sin.device), persistent=False)
                 attn.grid_h = new_grid_h
                 attn.grid_w = new_grid_w
+            self._update_merger_grid(new_grid_h, new_grid_w)
             self._current_grid = key
             return
 
@@ -874,7 +884,20 @@ class MoonViTVisionModel(nn.Module):
             "pos_emb": self.embeddings.pos_emb_baked.detach().clone(),
             "freqs": cached_freqs_list,
         }
+        self._update_merger_grid(new_grid_h, new_grid_w)
         self._current_grid = key
+
+    def _update_merger_grid(self, new_grid_h: int, new_grid_w: int) -> None:
+        """Merger must track non-canonical grids or it raises on L_pre mismatch."""
+        kh, kw = self.merger.kh, self.merger.kw
+        if new_grid_h % kh != 0 or new_grid_w % kw != 0:
+            raise RuntimeError(
+                f"non-canonical grid ({new_grid_h},{new_grid_w}) not divisible by merger kernel ({kh},{kw})"
+            )
+        self.merger.grid_h = new_grid_h
+        self.merger.grid_w = new_grid_w
+        self.merger.nh = new_grid_h // kh
+        self.merger.nw = new_grid_w // kw
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         # FAIL LOUD on input shape
@@ -1208,6 +1231,190 @@ class MoonViTVisionModel(nn.Module):
         return model
 
 
+
+
+# ----------------------------------------------------------------------
+# PT-only attention adapter (Option B2) -- parity harness for Mac/CI runs.
+#
+# The TRT-LLM-bound MoonViTAttention requires a live ModelConfig with
+# attn_backend == VANILLA and a lazy import of tensorrt_llm._torch.modules.
+# That belongs in build.py (still scaffolding). Until build.py exists, this
+# pure-PT block lets us exercise the encoder forward path end-to-end.
+#
+# Math:
+#   x_norm = norm0(x)
+#   qkv    = wqkv(x_norm)                              # (L, 3*H*D_head)
+#   q,k,v  = qkv.chunk(3, dim=-1)                      # each (L, H*D_head)
+#   q,k    = apply_rope_real(q,k, freqs_packed)        # 2-D RoPE
+#   attn   = softmax(q @ k.T / sqrt(D_head)) @ v       # SigLIP-style MHA
+#   x      = x + wo(attn)
+#   x      = x + mlp(norm1(x))
+#
+# freqs are supplied at swap time and shared across all 27 blocks (same buffer
+# dedup contract as the TRT-LLM path).
+# ----------------------------------------------------------------------
+class _PTBlockFreqsProxy(nn.Module):
+    """Thin handle that exposes reslice_freqs so MoonViTVisionModel._iter_attentions
+    can re-rope this block on set_grid(). Mutates the parent block's freqs_packed in place."""
+    def __init__(self, parent, freqs_source):
+        super().__init__()
+        self._parent = parent
+        # store the un-sliced full freqs source as a non-persistent buffer
+        # Expected layout: (H_max, W_max, D_head/2, 2) — last dim packs (cos, sin).
+        self.register_buffer("freqs_source", freqs_source, persistent=False)
+
+    def reslice_freqs(self, new_grid_h, new_grid_w):
+        new_grid_h = int(new_grid_h)
+        new_grid_w = int(new_grid_w)
+        if new_grid_h <= 0 or new_grid_w <= 0:
+            raise RuntimeError(
+                f"reslice_freqs: positive grid required, got ({new_grid_h},{new_grid_w})"
+            )
+        H_max, W_max = self.freqs_source.shape[0], self.freqs_source.shape[1]
+        if new_grid_h > H_max or new_grid_w > W_max:
+            raise RuntimeError(
+                f"reslice_freqs: grid ({new_grid_h},{new_grid_w}) exceeds source ({H_max},{W_max})"
+            )
+        sliced = self.freqs_source[:new_grid_h, :new_grid_w].reshape(
+            new_grid_h * new_grid_w, -1, 2
+        )
+        # Update parent's freqs_packed in place (re-register so shape changes take effect).
+        dev = self._parent.freqs_packed.device
+        dtype = self._parent.freqs_packed.dtype
+        self._parent.register_buffer(
+            "freqs_packed",
+            sliced.to(device=dev, dtype=dtype).contiguous(),
+            persistent=False,
+        )
+
+
+def build_freqs_packed_for(freqs_cis_table, h, w):
+    """Slice the HF freqs_cis table for (h, w) and pack as (L, D_head/2, 2) real.
+
+    Input freqs_cis_table is complex (H_max, W_max, D_head/2). Output is a real
+    tensor (h*w, D_head/2, 2) where the last dim is (cos, sin), matching the
+    layout consumed by _MoonViTPTAttentionBlock.forward and patches.apply_rope_real.
+    """
+    fc = freqs_cis_table[:h, :w].reshape(-1, freqs_cis_table.shape[-1])  # complex (L, D/2)
+    cos = fc.real.contiguous().float()
+    sin = fc.imag.contiguous().float()
+    return torch.stack([cos, sin], dim=-1).contiguous()  # (L, D/2, 2)
+
+
+class _MoonViTPTAttentionBlock(nn.Module):
+    """Pure-PT MoonViT encoder block. Drop-in replacement for _MoonViTEncoderBlock
+    that owns real attention math instead of raising. Re-uses the existing
+    wqkv/wo/norm0/norm1/mlp submodules from the source block (no weight copy)."""
+
+    def __init__(self, source_block, freqs_packed):
+        super().__init__()
+        self.norm0 = source_block.norm0
+        self.wqkv = source_block.wqkv
+        self.wo = source_block.wo
+        self.norm1 = source_block.norm1
+        self.mlp = source_block.mlp
+        self.hidden_size = int(source_block.hidden_size)
+        self.n_heads = int(source_block.n_heads)
+        self.head_dim = int(source_block.head_dim)
+        self.register_buffer("freqs_packed", freqs_packed, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from lrai_locate_anything.patches import apply_rope_real as _apply_rope_real
+
+        if x.shape[-1] != self.hidden_size:
+            raise RuntimeError(
+                f"_MoonViTPTAttentionBlock: input last dim {x.shape[-1]} != hidden_size {self.hidden_size}"
+            )
+
+        x_n = self.norm0(x)
+        qkv = self.wqkv(x_n)
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        H = self.n_heads
+        Dh = self.head_dim
+
+        squeeze_batch = False
+        if q.ndim == 3 and q.shape[0] == 1:
+            q = q.squeeze(0); k = k.squeeze(0); v = v.squeeze(0)
+            squeeze_batch = True
+        elif q.ndim != 2:
+            raise RuntimeError(
+                f"_MoonViTPTAttentionBlock expects (L, H*Dh) or (1, L, H*Dh); "
+                f"got q.ndim={q.ndim} shape={tuple(q.shape)}"
+            )
+
+        L_q = q.shape[0]
+        if self.freqs_packed.shape[0] != L_q:
+            raise RuntimeError(
+                f"freqs_packed length {self.freqs_packed.shape[0]} != L {L_q}"
+            )
+        if self.freqs_packed.shape[-2] != Dh // 2:
+            raise RuntimeError(
+                f"freqs_packed inner dim {self.freqs_packed.shape[-2]} != head_dim//2 {Dh//2}"
+            )
+
+        q = q.reshape(L_q, H, Dh)
+        k = k.reshape(L_q, H, Dh)
+        v = v.reshape(L_q, H, Dh)
+
+        freqs = self.freqs_packed.to(q.dtype)
+        q, k = _apply_rope_real(q, k, freqs)
+
+        q = q.transpose(0, 1)
+        k = k.transpose(0, 1)
+        v = v.transpose(0, 1)
+        scale = 1.0 / math.sqrt(Dh)
+        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+        attn = torch.softmax(attn.float(), dim=-1).to(v.dtype)
+        out = torch.matmul(attn, v)
+        out = out.transpose(0, 1).contiguous().reshape(L_q, H * Dh)
+
+        out = self.wo(out)
+        if squeeze_batch:
+            out = out.unsqueeze(0)
+
+        x = x + out
+        x = x + self.mlp(self.norm1(x))
+        return x
+
+
+def _install_pt_attention_swap(model, freqs_packed, freqs_source=None):
+    """Swap every _MoonViTEncoderBlock in encoder.blocks for a _MoonViTPTAttentionBlock.
+
+    If `freqs_source` is supplied (layout (H_max, W_max, D_head/2, 2)), each new
+    PT block is also given a `block.attention = _PTBlockFreqsProxy(block, freqs_source)`
+    so MoonViTVisionModel._iter_attentions can re-rope on set_grid(). Without a
+    source, set_grid() will FAIL LOUD via the proxy's absence — no silent skip.
+    """
+    encoder = model.transformer.encoder
+    if not hasattr(encoder, "blocks"):
+        raise RuntimeError("encoder has no .blocks attribute")
+    new_blocks = nn.ModuleList()
+    for i, blk in enumerate(encoder.blocks):
+        if isinstance(blk, _MoonViTPTAttentionBlock):
+            new_blocks.append(blk)
+            continue
+        if not isinstance(blk, _MoonViTEncoderBlock):
+            raise RuntimeError(
+                f"block[{i}] is {type(blk).__name__}, not _MoonViTEncoderBlock; "
+                f"refusing to swap an unexpected block type"
+            )
+        new_block = _MoonViTPTAttentionBlock(blk, freqs_packed)
+        if freqs_source is not None:
+            new_block.attention = _PTBlockFreqsProxy(new_block, freqs_source)
+        new_blocks.append(new_block)
+    encoder.blocks = new_blocks
+    return model
+
+
+def _install_pt_attention_swap_method(self, freqs_packed, freqs_source=None):
+    """Method bound onto MoonViTVisionModel; see _install_pt_attention_swap."""
+    return _install_pt_attention_swap(self, freqs_packed, freqs_source=freqs_source)
+
+
+MoonViTVisionModel.install_pt_attention_swap = _install_pt_attention_swap_method
+
+
 # ----------------------------------------------------------------------
 # Site 8 helpers — pure-PT encoder skeleton + strict tensor copy utilities.
 # Kept module-level (not nested) so build.py can reuse the same shapes when
@@ -1223,7 +1430,7 @@ class _MoonViTMLP(nn.Module):
         super().__init__()
         self.fc0 = nn.Linear(hidden_size, intermediate_size)
         self.fc1 = nn.Linear(intermediate_size, hidden_size)
-        self.act = nn.GELU()
+        self.act = nn.GELU(approximate='tanh')  # matches HF MoonViT PytorchGELUTanh; vendor diverges from exact erf by ~1.06 across 27 layers
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc1(self.act(self.fc0(x)))
