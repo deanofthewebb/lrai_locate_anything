@@ -349,12 +349,19 @@ def main() -> int:
                     help="Detection prompt (canonicalize_prompt auto-pluralizes singulars)")
     ap.add_argument("--device", default=None,
                     help="Override device (cpu/mps/cuda); default = autodetect")
-    ap.add_argument("--path", default="pt", choices=("auto", "pt", "trt"),
+    ap.add_argument("--path", default="pt", choices=("auto", "pt", "trt", "trtllm"),
                     help="Inference backend. Default 'pt' — the TRT decode engines "
                          "currently return all-zero logits after the bf16 export "
                          "switch (verified via MTP-decode probe in Colab dumps). "
                          "Use 'trt' once the engine regression is fixed; 'auto' "
-                         "picks trt if engines loaded, else pt.")
+                         "picks trt if engines loaded, else pt. 'trtllm' swaps in "
+                         "the LocateAnythingTRTLLMRunner (fused MoonViT+projector "
+                         "TRT engine + TRT-LLM ModelRunner for the LLM). Requires "
+                         "--engine-dir with llm.engine + vision_encoder.engine.")
+    ap.add_argument("--engine-dir", type=Path, default=None,
+                    help="Directory with TRT-LLM engines (llm.engine + "
+                         "vision_encoder.engine). Required when --path trtllm. "
+                         "Typical: /mnt/ssd0/locany_test_lvl2/engines_trtllm")
     ap.add_argument("--max-side", type=int, default=0,
                     help="If >0, downscale each frame so its longest side <= max-side "
                          "before detect() (vision-attention memory caps VRAM-limited GPUs). "
@@ -369,18 +376,58 @@ def main() -> int:
 
     # Lazy import so --help works without torch
     import torch
-    from lrai_locate_anything.model_loader import load_locateanything_3b
-    from lrai_locate_anything.orchestrator import LocateAnythingRunner, canonicalize_prompt
+    from lrai_locate_anything.orchestrator import canonicalize_prompt
     from lrai_locate_anything.parse import parse_boxes_with_labels
 
-    print(f"[audit] device={args.device or 'auto'}  weights={args.weights}", file=sys.stderr)
+    # Backend dispatch. The trtllm backend uses a completely separate runner
+    # (LocateAnythingTRTLLMRunner) that fuses MoonViT+projector into a single
+    # TRT engine and drives the LLM via tensorrt_llm.runtime.ModelRunner. It
+    # has its own detect(image, prompt) -> (List[(bbox, label)], raw_text)
+    # signature, so we branch the per-frame call below as well.
+    print(f"[audit] device={args.device or 'auto'}  weights={args.weights}  "
+          f"path={args.path}", file=sys.stderr)
     t_load_0 = time.time()
-    model, tok, proc, cfg, local, snap = load_locateanything_3b(
-        local_dir=args.weights, verbose=True,
-    )
-    if args.device:
-        model.to(args.device)
-    runner = LocateAnythingRunner(model, tok, proc, cfg, local, patches_snapshot=snap)
+    if args.path == "trtllm":
+        if args.engine_dir is None:
+            print("[audit] ERROR: --path trtllm requires --engine-dir "
+                  "(must contain llm.engine + vision_encoder.engine)",
+                  file=sys.stderr)
+            return 2
+        # Fail loud if the runner module is missing (e.g. trtllm venv not active).
+        from lrai_locate_anything.trtllm_prod.runner import LocateAnythingTRTLLMRunner
+        engine_dir = Path(args.engine_dir)
+        llm_engine_path = engine_dir / "llm.engine"
+        vision_engine_path = engine_dir / "vision_encoder.engine"
+        if not llm_engine_path.exists():
+            # ModelRunner.from_dir accepts the directory directly; fall back to
+            # passing the engine_dir itself so the runner can resolve rank0.engine.
+            llm_engine_path = engine_dir
+        if not vision_engine_path.exists():
+            raise FileNotFoundError(
+                f"vision_encoder.engine not found at {vision_engine_path}. "
+                f"Phase D build (export_prod) is required for --path trtllm."
+            )
+        # vision_mode='pt' keeps the MoonViT+projector vision tower on the PT
+        # path (HF weights from weights_dir) while the LLM runs through the
+        # TRT-LLM ModelRunner. The fused vision_encoder.engine path is the
+        # alternate mode once Phase D vision export is validated.
+        runner = LocateAnythingTRTLLMRunner(
+            llm_engine_path=llm_engine_path,
+            vision_proj_engine_path=vision_engine_path,
+            hf_dir=args.weights,
+            vision_mode='pt',
+            weights_dir=args.weights,
+        )
+        model = None  # unused on this path
+    else:
+        from lrai_locate_anything.model_loader import load_locateanything_3b
+        from lrai_locate_anything.orchestrator import LocateAnythingRunner
+        model, tok, proc, cfg, local, snap = load_locateanything_3b(
+            local_dir=args.weights, verbose=True,
+        )
+        if args.device:
+            model.to(args.device)
+        runner = LocateAnythingRunner(model, tok, proc, cfg, local, patches_snapshot=snap)
     print(f"[audit] load_time={time.time() - t_load_0:.1f}s", file=sys.stderr)
 
     # Canonicalize the prompt once (auto-pluralizes per the new helper)
@@ -463,13 +510,20 @@ def main() -> int:
             pil_in = pil
 
         t0 = time.time()
-        # Re-parse the raw text with labels (runner.detect returns labelless
-        # boxes for back-compat; class labels live in the <ref>...</ref> tags
-        # which are dropped by parse_boxes).
-        _boxes_unused, raw_text = runner.detect(
-            pil_in, canonical_prompt, diagnostic=False, path=args.path,
-        )
-        labeled = parse_boxes_with_labels(raw_text, W=float(pil_in.size[0]), H=float(pil_in.size[1]))
+        if args.path == "trtllm":
+            # TRTLLM runner returns labeled detections directly (already in
+            # original-image pixel space — vision adapter tracks the letterbox
+            # scale/pad internally). No diagnostic/path kwargs.
+            labeled, raw_text = runner.detect(pil_in, canonical_prompt)
+        else:
+            # Re-parse the raw text with labels (runner.detect returns labelless
+            # boxes for back-compat; class labels live in the <ref>...</ref> tags
+            # which are dropped by parse_boxes).
+            _boxes_unused, raw_text = runner.detect(
+                pil_in, canonical_prompt, diagnostic=False, path=args.path,
+            )
+            labeled = parse_boxes_with_labels(
+                raw_text, W=float(pil_in.size[0]), H=float(pil_in.size[1]))
         inference_time += time.time() - t0
         n_inferences += 1
         n_detections_total += len(labeled)
