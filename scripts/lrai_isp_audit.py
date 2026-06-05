@@ -89,6 +89,40 @@ _FLASH_COLOR = (0, 220, 255)
 _DEFAULT_LINE_COLOR = (255, 0, 0)
 
 
+# Per-class bbox colors (BGR). Class strings normalized via _norm_class_label.
+# Chosen for high contrast + non-collision with the yellow flash + blue default line.
+CLASS_COLORS = {
+    "roller bags":    (50, 50, 220),    # red
+    "shoulder bags":  (0, 140, 255),    # orange
+    "carry-ons":      (255, 200, 0),    # cyan
+    "people":         (90, 220, 50),    # green
+    "person":         (90, 220, 50),    # alias for singular
+    "other":          (0, 230, 255),    # yellow (same hue family as flash but ok)
+}
+_BBOX_DEFAULT_COLOR = (0, 255, 0)  # green fallback
+_BBOX_THICKNESS = 2
+
+
+def _norm_class_label(label: str) -> str:
+    """Normalize a class label for palette lookup. lowercase + collapse separators."""
+    if not isinstance(label, str):
+        return "other"
+    s = label.strip().lower().replace("_", " ").replace("-", "-")
+    # Map common variants
+    aliases = {
+        "roller bag": "roller bags", "rollerbag": "roller bags",
+        "shoulder bag": "shoulder bags", "shoulderbag": "shoulder bags",
+        "carry on": "carry-ons", "carryon": "carry-ons", "carry-on": "carry-ons",
+        "person": "people",
+    }
+    return aliases.get(s, s)
+
+
+def _color_for_class(label: str) -> tuple:
+    """Return BGR tuple for a class label."""
+    return CLASS_COLORS.get(_norm_class_label(label), _BBOX_DEFAULT_COLOR)
+
+
 @dataclass
 class LineConfig:
     line_id: str
@@ -613,8 +647,10 @@ def main() -> int:
 
         # Overlay
         if writer is not None:
-            for (x1, y1, x2, y2), _lbl in labeled:
-                cv2.rectangle(bgr, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+            for (x1, y1, x2, y2), lbl in labeled:
+                bbox_color = _color_for_class(lbl)
+                cv2.rectangle(bgr, (int(x1), int(y1)), (int(x2), int(y2)),
+                              bbox_color, _BBOX_THICKNESS)
             # Per-class HUD in TOP-LEFT corner with a semi-transparent dark
             # background rectangle for readability on busy footage.
             hud_lines = [f"{c}: IN={in_per_class[c]}  OUT={out_per_class[c]}"
@@ -635,15 +671,17 @@ def main() -> int:
                             0.55, (255, 255, 255), 1, cv2.LINE_AA)
             for ln in lines_cfg:
                 # Flash: paint in flash-color for N processed frames after a
-                # crossing; otherwise use the default blue line color.
-                line_color = (
-                    _FLASH_COLOR
-                    if processed_frame_count < ln.flash_until_frame
-                    else _DEFAULT_LINE_COLOR
-                )
+                # crossing; otherwise use the default blue line color. Boost
+                # thickness during the flash window for stronger visual cue.
+                is_flashing = processed_frame_count < ln.flash_until_frame
+                line_color = _FLASH_COLOR if is_flashing else _DEFAULT_LINE_COLOR
+                line_thickness = 5 if is_flashing else 2
                 for (a, b) in ln.segments:
                     cv2.line(bgr, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
-                             line_color, 2)
+                             line_color, line_thickness)
+                # Anchor dot helps orient IN/OUT direction during playback.
+                cv2.circle(bgr, (int(ln.anchor[0]), int(ln.anchor[1])), 4,
+                           line_color, -1)
             writer.write(bgr)
 
         processed_frame_count += 1
