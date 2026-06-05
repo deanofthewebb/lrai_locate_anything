@@ -6,6 +6,8 @@ and returns the full output sequence.
 """
 from __future__ import annotations
 import json
+import math
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Tuple
 
@@ -15,6 +17,18 @@ from PIL import Image
 from .moonvit_adapter import MoonViTAdapter
 from lrai_locate_anything.parse import parse_boxes
 from lrai_locate_anything.orchestrator import canonicalize_prompt
+
+# Vendor coord-token id range (Qwen2.5-VL LocateAnything-3B tokenizer).
+# Coordinate tokens are <0>..<1000> mapped to ids 151677..152677. The runner
+# uses this to filter out bracket tokens (<box>, </box>, <ref>, ...) when
+# computing per-box confidence from per-token log-probs.
+_COORD_TOK_ID_MIN = 151677
+_COORD_TOK_ID_MAX = 152677
+
+# Matches a full <box><x1><y1><x2><y2></box> block in the decoded text. Used
+# to locate the character span of each box so we can map back to the token
+# indices whose log-probs contribute to the box's confidence.
+_BOX_SPAN_RE = re.compile(r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>")
 
 if TYPE_CHECKING:
     pass
@@ -306,7 +320,7 @@ class LocateAnythingTRTLLMRunner:
         max_new_tokens: int = 128,
         temperature: float = 0.0,
         top_p: float = 1.0,
-    ) -> Tuple[List[Tuple[tuple, str]], str]:
+    ) -> Tuple[List[Tuple[tuple, str, float]], str]:
         """Run a single grounding query against the image.
 
         Args:
@@ -321,9 +335,12 @@ class LocateAnythingTRTLLMRunner:
 
         Returns:
             (detections, raw_text) where:
-              detections is a list of ((x1, y1, x2, y2), label) tuples in
-              the original image's pixel coordinates, and
+              detections is a list of ((x1, y1, x2, y2), label, confidence)
+              tuples in the original image's pixel coordinates, and
               raw_text is the un-parsed decoded string (for debug / logging).
+              confidence is exp(mean(per-coord-token log_probs)) computed over
+              the 4 coordinate tokens inside the <box>...</box> span (bracket
+              tokens excluded). NaN if no coord tokens were found for a box.
         """
         if not isinstance(image, Image.Image):
             image = Image.open(image).convert("RGB")
@@ -381,44 +398,129 @@ class LocateAnythingTRTLLMRunner:
         # scatters them into the embed_tokens output at the slots whose ids
         # are >= vocab_size. prompt_tasks = "0" (string of comma-separated
         # per-batch indices) selects row 0 of prompt_table for batch item 0.
-        do_sample = temperature > 0.0
+        #
+        # We always pass temperature=1.0 + top_k=1 so TRT-LLM still routes
+        # through its softmax (so output_log_probs are informative per-token
+        # log-likelihoods). temperature=0.0 short-circuits to a hardcoded
+        # log(1.0)=0 dummy log-prob and gives us no confidence signal. With
+        # top_k=1 the chosen token is still the argmax, so behavior matches
+        # greedy decode while preserving real softmax mass on the winner.
+        # The `temperature` / `top_p` args to this method are accepted for
+        # API back-compat but no longer change sampling on this path.
+        _ = (temperature, top_p)  # explicit: args unused on the logprob path
         outputs = self.llm_runner.generate(
             batch_input_ids=[input_ids],
             max_new_tokens=int(max_new_tokens),
             end_id=self.eos_token_id,
             pad_id=self.pad_token_id,
-            temperature=float(temperature) if do_sample else 1.0,
-            top_p=float(top_p) if do_sample else 0.0,
-            top_k=0 if do_sample else 1,
+            temperature=1.0,
+            top_k=1,
             prompt_table=prompt_table,
             prompt_tasks="0",
             prompt_vocab_size=L_post_actual,
             output_sequence_lengths=True,
+            output_log_probs=True,
             return_dict=True,
         )
 
         # 5. Decode the new tokens only (strip the prompt prefix).
         # outputs["output_ids"] shape: (batch, beam, seq). We took batch=1, beam=1.
+        # outputs["log_probs"] shape: (batch, beam, max_seq_len). Each value is
+        # the per-sampled-token log-prob under the model's softmax at that step.
+        # NOTE on indexing: TRT-LLM populates output_ids in absolute sequence
+        # position (so positions [0:prompt_len] are the input prompt copied
+        # through), but log_probs is allocated only over GENERATED tokens — its
+        # index 0 corresponds to generated-token 0 (= absolute position
+        # prompt_len). We therefore slice output_ids with [prompt_len:total_len]
+        # but log_probs with [0:total_len - prompt_len]. Misaligning these by
+        # `prompt_len` would silently shift confidence onto the wrong tokens.
         output_ids = outputs["output_ids"]
         seq_lens = outputs.get("sequence_lengths", None)
+        log_probs_all = outputs.get("log_probs", None)
         prompt_len = int(input_ids.shape[0])
         if seq_lens is not None:
             total_len = int(seq_lens[0][0])
             new_ids = output_ids[0][0][prompt_len:total_len]
         else:
+            total_len = int(output_ids.shape[-1])
             new_ids = output_ids[0][0][prompt_len:]
+        n_gen = int(new_ids.shape[0])
+        if log_probs_all is not None and n_gen > 0:
+            gen_log_probs = log_probs_all[0][0][:n_gen]
+        else:
+            gen_log_probs = None
         raw_text = self.tokenizer.decode(new_ids, skip_special_tokens=False)
 
-        # 6. Parse boxes and (TRT mode only) un-letterbox into ORIGINAL image
+        # 6. Build per-token (char_start, char_end) spans by re-decoding each
+        # generated token id one at a time. We MUST set skip_special_tokens=False
+        # here so the <box>/</box> bracket tokens render and stay in lockstep
+        # with the boxes we are about to regex-match. The running concatenation
+        # may not byte-equal `raw_text` if HF inserts whitespace differently for
+        # single-token vs batch decode -- that's fine, the regex re-runs on the
+        # running string we built.
+        token_char_spans: List[Tuple[int, int]] = []
+        running_text_parts: List[str] = []
+        running_len = 0
+        gen_token_ids = [int(t) for t in new_ids.tolist()]
+        for tok_id in gen_token_ids:
+            piece = self.tokenizer.decode([tok_id], skip_special_tokens=False)
+            start = running_len
+            running_len += len(piece)
+            running_text_parts.append(piece)
+            token_char_spans.append((start, running_len))
+        running_text = "".join(running_text_parts)
+
+        # Per-box confidence: for each <box>...</box> match in running_text,
+        # take token indices fully inside the span (excluding the <box> and
+        # </box> bracket tokens), filter to the coord-int tokens
+        # (id in [_COORD_TOK_ID_MIN, _COORD_TOK_ID_MAX]), and compute
+        # exp(mean(log_probs)) over those 4 tokens. Geometric mean over the 4
+        # coord tokens is the per-box confidence. If we found 0 coord tokens
+        # (malformed output), confidence is NaN. We deliberately do NOT mix in
+        # bracket-token log-probs -- they're near-deterministic (~0) and would
+        # bias confidence upward.
+        box_open_len = len("<box>")
+        box_close_len = len("</box>")
+        per_box_confidence: List[float] = []
+        for m in _BOX_SPAN_RE.finditer(running_text):
+            char_start = m.start()
+            char_end = m.end()
+            inner_start = char_start + box_open_len
+            inner_end = char_end - box_close_len
+            if gen_log_probs is None:
+                per_box_confidence.append(float("nan"))
+                continue
+            coord_lp: List[float] = []
+            for i, (s, e) in enumerate(token_char_spans):
+                if s < inner_start or e > inner_end:
+                    continue
+                tid = gen_token_ids[i]
+                if _COORD_TOK_ID_MIN <= tid <= _COORD_TOK_ID_MAX:
+                    coord_lp.append(float(gen_log_probs[i]))
+            if not coord_lp:
+                per_box_confidence.append(float("nan"))
+            else:
+                mean_lp = sum(coord_lp) / len(coord_lp)
+                per_box_confidence.append(math.exp(mean_lp))
+
+        # 7. Parse boxes and (TRT mode only) un-letterbox into ORIGINAL image
         # pixel coords. parse_boxes returns coordinates scaled to the (W, H)
         # we pass; for PT mode that is PIL.size (already final); for TRT mode
         # we pass the letterboxed engine resolution and undo the transform.
+        # Box order is emission order, identical to _BOX_SPAN_RE.finditer
+        # order, so we zip the parser output against per_box_confidence by
+        # index. If the two counts disagree (shouldn't, but be loud), pad with
+        # NaN so downstream still gets one confidence per detection.
         boxes_lb = parse_boxes(raw_text, parse_w, parse_h)
-        detections: List[Tuple[tuple, str]] = []
+        if len(per_box_confidence) < len(boxes_lb):
+            per_box_confidence = per_box_confidence + [float("nan")] * (
+                len(boxes_lb) - len(per_box_confidence)
+            )
+        detections: List[Tuple[tuple, str, float]] = []
         need_unwarp = self.vision.vision_mode == "trt" and (
             scale != 1.0 or pad_x != 0 or pad_y != 0
         )
-        for ((x1, y1, x2, y2), label) in boxes_lb:
+        for idx, ((x1, y1, x2, y2), label) in enumerate(boxes_lb):
             if need_unwarp:
                 ox1 = (x1 - pad_x) / scale
                 oy1 = (y1 - pad_y) / scale
@@ -433,7 +535,8 @@ class LocateAnythingTRTLLMRunner:
             oy1 = max(0.0, min(float(orig_h), oy1))
             ox2 = max(0.0, min(float(orig_w), ox2))
             oy2 = max(0.0, min(float(orig_h), oy2))
-            detections.append(((ox1, oy1, ox2, oy2), label))
+            conf = per_box_confidence[idx] if idx < len(per_box_confidence) else float("nan")
+            detections.append(((ox1, oy1, ox2, oy2), label, conf))
         return detections, raw_text
 
     # ------------------------------------------------------------------

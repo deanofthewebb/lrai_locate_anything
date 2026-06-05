@@ -10,9 +10,15 @@ Detector backend swap: PeopleNet ONNX → LocateAnything-3B VLM. Tracker swap:
 safetunnel ByteTracker → minimal greedy-IoU tracker (BT not yet ported; this
 matches well enough for AI-FPS measurement + line-crossing schema validation).
 
-Output schema (extends tracker_bot with a per-row class column):
-    frame,timestamp_s,line_id,line_name,track_id,class,direction,
+Output schema (extends tracker_bot with per-row class + confidence columns):
+    frame,timestamp_s,line_id,line_name,track_id,class,confidence,direction,
     coalesced,in_count_after,out_count_after,x,y
+
+`confidence` is exp(mean(per-coord-token log_probs)) for the detection that
+seeded this track at the row's frame -- only populated on the --path trtllm
+backend (which exposes per-token log-probs from TRT-LLM's softmax). For the
+pt/trt backends the column is left empty so the schema stays stable across
+backends.
 
 Performance metrics printed to stderr:
     ai_fps     — detect() throughput (inferences / sum-of-detect-time)
@@ -159,7 +165,8 @@ def _build_line_configs(lines_json_path: Path) -> List[LineConfig]:
 def _evaluate_line(line: LineConfig, track_id: int, track_class: str,
                    prev_pt, curr_pt, frame: int, ts: float,
                    processed_frame_count: int = 0,
-                   flash_frames: int = _FLASH_FRAMES_DEFAULT) -> List[dict]:
+                   flash_frames: int = _FLASH_FRAMES_DEFAULT,
+                   confidence: Optional[float] = None) -> List[dict]:
     """Check every segment of `line` for a crossing on the `prev_pt → curr_pt`
     motion vector. Apply anchor-side polarity and coalesce dedup. Returns
     CSV rows (one per crossing event).
@@ -199,10 +206,21 @@ def _evaluate_line(line: LineConfig, track_id: int, track_class: str,
         # Flash: extend the flash window on every crossing event.
         line.flash_until_frame = processed_frame_count + flash_frames
 
+        # confidence column: empty string when None (pt/trt backends);
+        # formatted to 4 decimals otherwise. NaN renders as "nan" -- preserved
+        # verbatim so downstream readers can detect malformed-output frames.
+        if confidence is None:
+            conf_cell = ""
+        else:
+            try:
+                conf_cell = f"{float(confidence):.4f}"
+            except (TypeError, ValueError):
+                conf_cell = ""
         rows.append({
             "frame": frame, "timestamp_s": f"{ts:.3f}",
             "line_id": line.line_id, "line_name": line.name,
             "track_id": track_id, "class": track_class,
+            "confidence": conf_cell,
             "direction": direction,
             "coalesced": coalesced,
             "in_count_after": line.in_count,
@@ -601,19 +619,30 @@ def main() -> int:
 
         t0 = time.time()
         if args.path == "trtllm":
-            # TRTLLM runner returns labeled detections directly (already in
-            # original-image pixel space — vision adapter tracks the letterbox
-            # scale/pad internally). No diagnostic/path kwargs.
-            labeled, raw_text = runner.detect(pil_in, canonical_prompt)
+            # TRTLLM runner returns labeled detections WITH confidence directly
+            # (already in original-image pixel space — vision adapter tracks the
+            # letterbox scale/pad internally). 3-tuple: (bbox, label, conf).
+            labeled_with_conf, raw_text = runner.detect(pil_in, canonical_prompt)
+            labeled = [(bbox, lbl) for (bbox, lbl, _c) in labeled_with_conf]
+            # Center -> confidence map (in pil_in coords). We resolve confidence
+            # per track later by nearest-center match against the tracker's
+            # curr_center, which is the centroid of the assigned detection.
+            det_centers_conf: List[Tuple[Tuple[float, float], float]] = [
+                (((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0), conf)
+                for (bbox, _lbl, conf) in labeled_with_conf
+            ]
         else:
             # Re-parse the raw text with labels (runner.detect returns labelless
             # boxes for back-compat; class labels live in the <ref>...</ref> tags
-            # which are dropped by parse_boxes).
+            # which are dropped by parse_boxes). pt/trt backends do not surface
+            # per-token log-probs, so detections have no confidence -- the CSV
+            # column is left empty for these rows.
             _boxes_unused, raw_text = runner.detect(
                 pil_in, canonical_prompt, diagnostic=False, path=args.path,
             )
             labeled = parse_boxes_with_labels(
                 raw_text, W=float(pil_in.size[0]), H=float(pil_in.size[1]))
+            det_centers_conf = []
         inference_time += time.time() - t0
         n_inferences += 1
         n_detections_total += len(labeled)
@@ -622,17 +651,44 @@ def main() -> int:
             inv = 1.0 / scale
             labeled = [((x1 * inv, y1 * inv, x2 * inv, y2 * inv), lbl)
                        for ((x1, y1, x2, y2), lbl) in labeled]
+            # Rescale center map to original-frame coords so the per-track
+            # nearest-center lookup below works in the same coord space the
+            # tracker reports curr_center in.
+            det_centers_conf = [
+                (((cx * inv, cy * inv)), conf)
+                for ((cx, cy), conf) in det_centers_conf
+            ]
 
         # Tracker + crossing eval
         tracks = tracker.update(list(labeled), frame_idx)
         for tid, tcls, prev_c, curr_c in tracks:
             # Bucket OOV (unrecognized) labels into "other" for the running tally
             bucket = tcls if tcls in in_per_class else "other"
+            # Look up the confidence of the detection that fed this track on
+            # the current frame by nearest-center match against curr_c. The
+            # tracker derives curr_center from the assigned detection's bbox
+            # centroid, so an exact (or near-exact) center match identifies
+            # the source detection without us needing to plumb a separate
+            # per-detection id through the tracker API.
+            track_conf: Optional[float] = None
+            if det_centers_conf:
+                best_d2 = float("inf")
+                best_conf = None
+                for (dc, dconf) in det_centers_conf:
+                    d2 = (dc[0] - curr_c[0]) ** 2 + (dc[1] - curr_c[1]) ** 2
+                    if d2 < best_d2:
+                        best_d2 = d2
+                        best_conf = dconf
+                # 4-pixel tolerance: trackers may report Kalman-predicted
+                # centers that drift slightly off the raw detection centroid.
+                if best_d2 <= 16.0:
+                    track_conf = best_conf
             for ln in lines_cfg:
                 new_rows = _evaluate_line(
                     ln, tid, tcls, prev_c, curr_c, frame_idx, ts,
                     processed_frame_count=processed_frame_count,
                     flash_frames=flash_frames,
+                    confidence=track_conf,
                 )
                 for r in new_rows:
                     if r["direction"] == "IN":
@@ -710,7 +766,7 @@ def main() -> int:
     with args.out_csv.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=[
             "frame", "timestamp_s", "line_id", "line_name", "track_id",
-            "class", "direction", "coalesced",
+            "class", "confidence", "direction", "coalesced",
             "in_count_after", "out_count_after", "x", "y",
         ])
         w.writeheader()
