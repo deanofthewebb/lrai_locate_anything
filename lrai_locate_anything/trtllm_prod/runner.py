@@ -399,14 +399,15 @@ class LocateAnythingTRTLLMRunner:
         # are >= vocab_size. prompt_tasks = "0" (string of comma-separated
         # per-batch indices) selects row 0 of prompt_table for batch item 0.
         #
-        # We always pass temperature=1.0 + top_k=1 so TRT-LLM still routes
-        # through its softmax (so output_log_probs are informative per-token
-        # log-likelihoods). temperature=0.0 short-circuits to a hardcoded
-        # log(1.0)=0 dummy log-prob and gives us no confidence signal. With
-        # top_k=1 the chosen token is still the argmax, so behavior matches
-        # greedy decode while preserving real softmax mass on the winner.
-        # The `temperature` / `top_p` args to this method are accepted for
-        # API back-compat but no longer change sampling on this path.
+        # Sampling params chosen to make output_log_probs informative.
+        # WRONG (prior commit 67b2f2c): temperature=1.0, top_k=1 — TRT-LLM
+        # computes log-prob over the size-1 filtered candidate set, so the
+        # chosen token has p=1.0 and log_prob=log(1.0)=0 — uninformative.
+        # RIGHT: temperature=1.0, top_k=0 (no filtering) so log_prob reflects
+        # the actual softmax over the full vocab. With temperature=1.0 sampling
+        # is stochastic, so we pin random_seed for reproducibility. The token
+        # ACTUALLY sampled is rarely the argmax — but for confidence the
+        # signal we want is the softmax mass on whichever token won.
         _ = (temperature, top_p)  # explicit: args unused on the logprob path
         outputs = self.llm_runner.generate(
             batch_input_ids=[input_ids],
@@ -414,7 +415,9 @@ class LocateAnythingTRTLLMRunner:
             end_id=self.eos_token_id,
             pad_id=self.pad_token_id,
             temperature=1.0,
-            top_k=1,
+            top_k=0,
+            top_p=1.0,
+            random_seed=42,
             prompt_table=prompt_table,
             prompt_tasks="0",
             prompt_vocab_size=L_post_actual,
