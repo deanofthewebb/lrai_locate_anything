@@ -399,25 +399,29 @@ class LocateAnythingTRTLLMRunner:
         # are >= vocab_size. prompt_tasks = "0" (string of comma-separated
         # per-batch indices) selects row 0 of prompt_table for batch item 0.
         #
-        # Sampling params chosen to make output_log_probs informative.
-        # WRONG (prior commit 67b2f2c): temperature=1.0, top_k=1 — TRT-LLM
-        # computes log-prob over the size-1 filtered candidate set, so the
-        # chosen token has p=1.0 and log_prob=log(1.0)=0 — uninformative.
-        # RIGHT: temperature=1.0, top_k=0 (no filtering) so log_prob reflects
-        # the actual softmax over the full vocab. With temperature=1.0 sampling
-        # is stochastic, so we pin random_seed for reproducibility. The token
-        # ACTUALLY sampled is rarely the argmax — but for confidence the
-        # signal we want is the softmax mass on whichever token won.
-        _ = (temperature, top_p)  # explicit: args unused on the logprob path
+        # Sampling: greedy (top_k=1, temp=1.0) for production-quality detections.
+        # TRT-LLM treats temperature=0.0 as a sentinel and skips its softmax,
+        # so we pass temperature=1.0 + top_k=1 (same argmax behavior as greedy,
+        # but the softmax pipeline runs).
+        #
+        # KNOWN LIMITATION on confidence: with top_k=1, TRT-LLM's output_log_probs
+        # is computed over the size-1 filtered candidate set, giving log(1.0)=0
+        # for every token (useless). Alternatives, all requiring more work:
+        #   (a) build engine with --gather_generation_logits + do greedy +
+        #       extract chosen-token softmax-prob from the full logits — RIGHT
+        #       answer; ~2min engine rebuild; deferred.
+        #   (b) top_k=0 with stochastic sampling — gives real log_probs but
+        #       output quality collapses to random-ish text (tested on AWQ:
+        #       produced gibberish even with bf16 LM head).
+        # For now: confidence column in CSV stays 1.0 (placeholder); see (a).
+        _ = (temperature, top_p)  # API back-compat; greedy on this path
         outputs = self.llm_runner.generate(
             batch_input_ids=[input_ids],
             max_new_tokens=int(max_new_tokens),
             end_id=self.eos_token_id,
             pad_id=self.pad_token_id,
             temperature=1.0,
-            top_k=0,
-            top_p=1.0,
-            random_seed=42,
+            top_k=1,
             prompt_table=prompt_table,
             prompt_tasks="0",
             prompt_vocab_size=L_post_actual,
